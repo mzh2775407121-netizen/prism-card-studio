@@ -1,0 +1,22 @@
+# Local projects and exports
+*.sqlite*
+*.db
+*.db-*
+*.cardproj
+*.zip
+.data/
+/output/
+/demo/verification/
+
+# Local configuration, installed dependencies, and generated files
+.env
+.env.*
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.venv/
+.DS_Store
+.impeccable/
+.taste-skill/

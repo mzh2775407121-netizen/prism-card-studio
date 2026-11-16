@@ -1,0 +1,6 @@
+预览结构与动效移植自本机「藏光 · 硬质收藏册」项目的 CardInspector.jsx 和 HoloCard.jsx。
+反光 CSS 与纹理取自该项目的 public/css 与 public/img。
+来源：Simon Goellner / simeydotme，pokemon-cards-css
+https://github.com/simeydotme/pokemon-cards-css
+许可：GPL-3.0。许可全文见 LICENSE.txt。
+Prism 使用原版的反光叠层和纹理，将正反面图文与工艺区域接到预览中。

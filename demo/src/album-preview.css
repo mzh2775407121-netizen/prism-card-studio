@@ -1,0 +1,199 @@
+/* 藏光 CardInspector layout and spring presentation, scoped to the Prism portal. */
+.prism-card-inspector.inspector-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: safe center;
+  justify-content: center;
+  overflow: auto;
+  --preview-padding: 22px;
+  --preview-arena-height: clamp(130px, min(78svh, 100svh - 206px), 820px);
+  padding: var(--preview-padding);
+  background: #e8e9e3;
+  color: #293229;
+  --inspector-muted: #4b584d;
+  transition: background .22s ease-out;
+}
+.prism-card-inspector[data-phase="loading"] { background: #e8e9e3ad; }
+.prism-card-inspector[data-phase="closing"] { background: #e8e9e300; }
+.prism-card-inspector .inspector { width: min(600px, 100%); position: relative; }
+.prism-card-inspector .inspector-top {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--inspector-muted);
+  font-size: 13px;
+}
+.prism-card-inspector .inspector-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 50%;
+  transition: background .2s;
+}
+.prism-card-inspector .inspector-icon:hover:not(:disabled) { background: #d9ded2; }
+.prism-card-inspector .close-button { background: #daddd3; }
+.prism-card-inspector .inspect-arena {
+  height: min(var(--preview-arena-height),
+    calc((min(600px, 100vw - 2 * var(--preview-padding)) - 12px) / var(--card-aspect) + 20px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  perspective: 1400px;
+  margin: 4px 0 8px;
+}
+.prism-card-inspector .card-flight {
+  height: calc(100% - 20px);
+  aspect-ratio: var(--card-aspect);
+  transform-origin: center;
+  transform-style: preserve-3d;
+  will-change: transform;
+  --pointer-x: 50%;
+  --pointer-y: 50%;
+  --pointer-from-center: 0;
+  --pointer-from-top: .5;
+  --pointer-from-left: .5;
+  --background-x: 50%;
+  --background-y: 50%;
+  --card-opacity: .8;
+  --card-scale: 1;
+}
+.prism-card-inspector .card-flight .card {
+  width: 100%;
+  max-width: none;
+  filter: none;
+}
+.prism-card-inspector .card-flight .card__translater {
+  transform: none;
+  perspective: 1400px;
+}
+.prism-card-inspector .card-flight .card__rotator {
+  width: 100%;
+  perspective: 1400px;
+  cursor: zoom-out;
+  touch-action: none;
+  isolation: auto;
+  overflow: visible;
+  transition: none;
+}
+.prism-card-inspector .card-flight .card.active .card__rotator {
+  box-shadow: 0 0 3px -1px white, 0 0 3px 1px var(--card-edge),
+    0 0 12px 2px var(--card-glow), 0 10px 20px -5px #000,
+    0 0 40px -30px var(--card-glow), 0 0 50px -20px var(--card-glow);
+}
+.prism-card-inspector .card-flight .card__rotator:focus-visible {
+  outline: 2px solid #4a8d76;
+  outline-offset: 5px;
+}
+.prism-card-inspector .card-flight .inspector-card-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  isolation: isolate;
+  border-radius: var(--card-radius);
+  background-color: #20251c;
+  --clip: none;
+  --clip-stage: none;
+  --clip-trainer: none;
+  --clip-borders: none;
+}
+.prism-card-inspector .card-flight .inspector-card-face.back {
+  transform: rotateY(180deg) translateZ(.01px);
+}
+.prism-card-inspector .card-flight .inspector-card-face img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+.prism-card-inspector .card.masked .inspector-card-face .card__shine {
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
+}
+.prism-card-inspector .card.masked .inspector-card-face .card__shine::before,
+.prism-card-inspector .card.masked .inspector-card-face .card__shine::after {
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+.prism-card-inspector .inspector-card-face .card__glare {
+  mask: var(--glare-mask) center / 100% 100% no-repeat;
+}
+.prism-card-inspector .card[data-style="original"] .card__shine { display: none; }
+.prism-card-inspector .card[data-style="original"] .card__glare { opacity: calc(var(--card-opacity) * .4); }
+.prism-card-inspector .inspector-chrome { transition: opacity .2s ease-out; }
+.prism-card-inspector .inspector[data-phase="loading"] :is(.inspect-info, .inspect-bottom) {
+  opacity: 0;
+  pointer-events: none;
+}
+.prism-card-inspector .inspector[data-phase="entering"] .inspector-chrome { opacity: 0; }
+.prism-card-inspector .inspector[data-phase="entering"] .inspector-actions,
+.prism-card-inspector .inspector[data-phase="closing"] .inspector-chrome { pointer-events: none; }
+.prism-card-inspector .inspector[data-phase="closing"] .inspector-chrome { opacity: 0; }
+.prism-card-inspector .inspect-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 16px;
+}
+.prism-card-inspector .inspect-info h2 {
+  margin: 0 0 4px;
+  font: 400 25px/1.4 "Songti SC", "Noto Serif SC", serif;
+  overflow-wrap: anywhere;
+}
+.prism-card-inspector .inspect-info p,
+.prism-card-inspector .inspect-bottom p,
+.prism-card-inspector .inspector-loading {
+  color: var(--inspector-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.prism-card-inspector .inspect-step { display: flex; gap: 6px; }
+.prism-card-inspector .inspect-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 16px 0;
+}
+.prism-card-inspector .inspector-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.prism-card-inspector .inspector-text,
+.prism-card-inspector .inspector-retry {
+  min-height: 34px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: #334c3b;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.prism-card-inspector .inspector-text:hover,
+.prism-card-inspector .inspector-text[aria-pressed="true"],
+.prism-card-inspector .inspector-retry:hover {
+  border-color: #c5cec1;
+  background: #e2e7dd;
+}
+@media (max-width: 650px) {
+  .prism-card-inspector.inspector-backdrop { --preview-padding: 18px; }
+  .prism-card-inspector .inspector-top { font-size: 12px; }
+  .prism-card-inspector .inspect-info, .prism-card-inspector .inspect-bottom { padding-inline: 5px; }
+  .prism-card-inspector .inspect-info h2 { font-size: 23px; }
+  .prism-card-inspector .inspect-info p, .prism-card-inspector .inspect-bottom p { font-size: 11px; }
+  .prism-card-inspector .inspect-bottom { flex-wrap: wrap; gap: 3px 8px; }
+  .prism-card-inspector .inspect-step { gap: 0; }
+  .prism-card-inspector .inspect-step .inspector-icon { width: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prism-card-inspector.inspector-backdrop, .prism-card-inspector .inspector-chrome { transition: none; }
+  .prism-card-inspector .card-flight { will-change: auto; }
+}
