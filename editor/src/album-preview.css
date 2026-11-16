@@ -111,20 +111,10 @@
   height: 100%;
   object-fit: fill;
 }
-.prism-card-inspector .card.masked .inspector-card-face .card__shine {
-  mask-size: 100% 100%;
-  mask-repeat: no-repeat;
-}
-.prism-card-inspector .card.masked .inspector-card-face .card__shine::before,
-.prism-card-inspector .card.masked .inspector-card-face .card__shine::after {
-  -webkit-mask-image: none !important;
-  mask-image: none !important;
-}
 .prism-card-inspector .inspector-card-face .card__glare {
   mask: var(--glare-mask) center / 100% 100% no-repeat;
+  opacity: calc(var(--card-opacity) * .52);
 }
-.prism-card-inspector .card[data-style="original"] .card__shine { display: none; }
-.prism-card-inspector .card[data-style="original"] .card__glare { opacity: calc(var(--card-opacity) * .4); }
 .prism-card-inspector .inspector-chrome { transition: opacity .2s ease-out; }
 .prism-card-inspector .inspector[data-phase="loading"] :is(.inspect-info, .inspect-bottom) {
   opacity: 0;

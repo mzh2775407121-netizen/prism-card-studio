@@ -1,14 +1,29 @@
 export type SideName = 'front' | 'back';
 export type TemplateName = 'ocean' | 'botanical' | 'editorial' | 'blank';
 export type EffectType = 'holo' | 'gold' | 'silver' | 'gloss' | 'emboss' | 'grain' | 'white';
+export type ProcessKind = 'reflection' | 'white' | 'foil' | 'varnish';
+export type StockReflection = 'none' | 'mirror' | 'rainbow' | 'radial';
+export const FLASH_STYLES = {
+  cosmos: {label:'星空闪',texture:'cosmos-bottom.png'},
+  geometric: {label:'几何镭射',texture:'geometric.png'},
+  glitter: {label:'细闪',texture:'glitter.png'},
+  linear: {label:'虹彩斜纹',texture:''},
+  radial: {label:'放射光束',texture:''},
+} as const;
+export type FlashStyle = keyof typeof FLASH_STYLES;
+export interface ImageCrop { x: number; y: number; width: number; height: number; space?: 'source' }
 export interface CardNode {
   id: string; name: string; type: 'image' | 'text' | 'rect' | 'ellipse' | 'polygon';
   x: number; y: number; width: number; height: number; rotation: number;
   opacity: number; visible: boolean; locked: boolean; fill: string;
   stroke?: string; strokeWidth?: number; text?: string; fontSize?: number;
   fontFamily?: string; fontStyle?: string; align?: string; src?: string;
-  crop?: { x: number; y: number; width: number; height: number };
-  blend?: string; lineHeight?: number; groupId?: string;
+  crop?: ImageCrop;
+  blend?: string; lineHeight?: number; letterSpacing?: number; cornerRadius?: number; groupId?: string;
+  clipRegionId?: string;
+  maskInk?: 'alpha' | 'dark';
+  polygon?: number[];
+  gradient?: { angle: number; stops: [number, string][] };
 }
 export interface Stroke { points: number[]; size: number; erase: boolean }
 export interface Region {
@@ -22,11 +37,57 @@ export interface Region {
 export interface Effect {
   id: string; name: string; type: EffectType; regionId: string;
   opacity: number; angle: number; visible: boolean;
+  process?: ProcessKind;
+  pattern?: 'linear' | 'radial' | 'grain';
+  flashStyle?: FlashStyle;
+  maskContent?: CardNode[];
 }
-export interface CardSide { nodes: CardNode[]; regions: Region[]; effects: Effect[] }
+export interface CardSide { nodes: CardNode[]; regions: Region[]; effects: Effect[]; reference?: { src: string; name: string } }
 export interface Project {
   id: string; name: string; version: number; widthMm: number; heightMm: number;
   bleedMm: number; material: string; previewStyle?: 'cosmos' | 'geometric' | 'glitter' | 'original'; front: CardSide; back: CardSide; updatedAt: number;
+  cornerRadiusMm?: number;
+  stockReflection?: StockReflection;
+}
+
+export const DEFAULT_CARD_CORNER_MM = 1.8;
+
+export function getCardCornerRadiusMm(project: Pick<Project, 'widthMm' | 'heightMm' | 'cornerRadiusMm'>) {
+  return Math.max(0, Math.min(project.cornerRadiusMm ?? DEFAULT_CARD_CORNER_MM, project.widthMm / 2, project.heightMm / 2));
+}
+
+export const PROCESS_LABELS: Record<ProcessKind, string> = {
+  reflection: '局部闪光', white: '白墨', foil: '箔版', varnish: '光油',
+};
+export const STOCK_REFLECTIONS: Record<StockReflection, string> = {
+  none: '无反光', mirror: '银色镜面', rainbow: '虹彩镭射', radial: '放射镭射',
+};
+
+export function getStockReflection(project: Project): StockReflection {
+  return project.stockReflection ?? (project.material === 'holo' ? 'rainbow' : project.material === 'silver' ? 'mirror' : 'none');
+}
+
+export function processKind(effect: Effect): ProcessKind {
+  if (effect.process) return effect.process;
+  if (effect.type === 'white') return 'white';
+  if (effect.type === 'gloss' || effect.type === 'emboss') return 'varnish';
+  return effect.type === 'grain' ? 'reflection' : 'foil';
+}
+
+export function getFlashStyle(project: Project, effect: Effect): FlashStyle {
+  if (effect.flashStyle) return effect.flashStyle;
+  if (effect.pattern === 'radial' || effect.pattern === 'linear') return effect.pattern;
+  if (effect.pattern === 'grain' || effect.type === 'grain') return 'glitter';
+  return project.previewStyle && project.previewStyle !== 'original' ? project.previewStyle : 'linear';
+}
+
+export function plateFor(effect: Effect): 'white' | 'foil' | 'clear' | undefined {
+  const kind = processKind(effect);
+  return kind === 'varnish' ? 'clear' : kind === 'reflection' ? undefined : kind;
+}
+
+export function processLayerEnabled(effect: Effect): boolean {
+  return effect.visible && (effect.process !== undefined && plateFor(effect) !== undefined || effect.opacity > 0);
 }
 
 export const uid = () => crypto.randomUUID();
@@ -62,7 +123,7 @@ export function createProject(template: TemplateName = 'ocean', name?: string): 
   const blank: CardSide = { nodes: [], regions: [region('整张卡面', 'full'), region('卡片边框', 'border')], effects: [] };
   if (template === 'blank') {
     return { id: uid(), name: name || TEMPLATE_NAMES.blank, version: 1, widthMm: 63,
-      heightMm: 88, bleedMm: 3, material: 'matte', front: structuredClone(blank),
+      heightMm: 88, bleedMm: 3, cornerRadiusMm: DEFAULT_CARD_CORNER_MM, material: 'matte', front: structuredClone(blank),
       back: structuredClone(blank), updatedAt: Date.now() };
   }
   const artwork = node('image', '主视觉', 25, 25, 580, 717, {
@@ -106,7 +167,7 @@ export function createProject(template: TemplateName = 'ocean', name?: string): 
   const backBorder = region('背面边框', 'border');
   return {
     id: uid(), name: name || TEMPLATE_NAMES[template], version: 1, widthMm: 63,
-    heightMm: 88, bleedMm: 3, material: 'holo', updatedAt: Date.now(),
+    heightMm: 88, bleedMm: 3, cornerRadiusMm: DEFAULT_CARD_CORNER_MM, material: 'holo', updatedAt: Date.now(),
     front: { nodes, regions: [all, border, artRegion, titleRegion], effects },
     back: { nodes: backNodes, regions: [region('整张卡面', 'full'), backBorder], effects: [
       { id: uid(), name: '背面金箔', type: 'gold', regionId: backBorder.id, opacity: 0.8, angle: 32, visible: true },

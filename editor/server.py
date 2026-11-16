@@ -44,7 +44,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 EXPORT_SLOTS = threading.BoundedSemaphore(2)
-PRINT_ENGINE = 'prism-print/1.0'
+PRINT_ENGINE = 'prism-print/1.1'
 DIST_DIRECTORY = Path(__file__).resolve().parent / 'dist'
 SPOT_PROFILES = {
     'standard': {'white': 'White', 'foil': 'Foil_Gold', 'clear': 'Spot_UV'},
@@ -114,6 +114,7 @@ def validate_request(payload):
         'heightMm': numeric(source.get('heightMm'), '高度', 20, 300),
         'bleedMm': numeric(source.get('bleedMm', 3), '出血', 0, 20),
         'material': str(source.get('material', '未指定'))[:200],
+        'stockReflection': str(source.get('stockReflection', '未指定'))[:40],
     }
     raw_pages = payload.get('pages')
     if not isinstance(raw_pages, list) or not 1 <= len(raw_pages) <= 2:
@@ -138,21 +139,49 @@ def validate_request(payload):
         if abs(artwork.width - expected_width) > 2:
             raise ExportError('图片宽高比与含出血的项目尺寸不一致')
         raw_plates = raw_page.get('plates', {})
+        raw_layers = raw_page.get('layers')
         if not isinstance(raw_plates, dict) or set(raw_plates) - set(ALTERNATES):
             raise ExportError('仅支持 white、foil、clear 工艺版')
+        if raw_layers is not None and (raw_plates or not isinstance(raw_layers, list) or len(raw_layers) > 64):
+            raise ExportError('每面最多支持 64 个独立工艺层')
         masks = {}
         thresholded = []
-        for key, value in raw_plates.items():
-            image = decode_image(value, f'{side} {key}')
+        layers = []
+
+        def read_mask(value, label):
+            image = decode_image(value, f'{side} {label}')
             if image.size != artwork.size:
-                raise ExportError(f'{side} 的 {key} 版与彩稿尺寸不一致')
+                raise ExportError(f'{side} 的 {label} 版与彩稿尺寸不一致')
             gray = np.asarray(image.convert('L'))
-            if np.any((gray > 0) & (gray < 255)):
-                thresholded.append(key)
-            # One deterministic threshold is shared by the PDF stencil and TIFF.
-            masks[key] = gray < 128
+            return gray < 128, bool(np.any((gray > 0) & (gray < 255)))
+
+        if raw_layers is not None:
+            ids = set()
+            for item in raw_layers:
+                if not isinstance(item, dict):
+                    raise ExportError('工艺层数据无效')
+                channel, layer_id, title = item.get('channel'), item.get('id'), item.get('name')
+                if (not isinstance(channel, str) or channel not in ALTERNATES or
+                        not isinstance(layer_id, str) or not 1 <= len(layer_id) <= 300 or layer_id in ids or
+                        not isinstance(title, str) or not 1 <= len(title.strip()) <= 100):
+                    raise ExportError('工艺层通道、标识或名称无效')
+                ids.add(layer_id)
+                mask, has_gray = read_mask(item.get('mask'), title)
+                if not mask.any():
+                    raise ExportError(f'「{title}」没有可输出的工艺覆盖区域')
+                if has_gray:
+                    thresholded.append(title)
+                layers.append({'id': layer_id, 'name': title, 'channel': channel, 'mask': mask,
+                               'regionId': str(item.get('regionId', ''))[:300],
+                               'variant': str(item.get('variant', ''))[:40]})
+                masks[channel] = (masks[channel] | mask) if channel in masks else mask
+        else:
+            for key, value in raw_plates.items():
+                masks[key], has_gray = read_mask(value, key)
+                if has_gray:
+                    thresholded.append(key)
         pages.append({'side': side, 'artwork': artwork, 'masks': masks,
-                      'thresholded': thresholded})
+                      'thresholded': thresholded, 'layers': layers})
     pages.sort(key=lambda page: 0 if page['side'] == 'front' else 1)
     return project, profile, pages
 
@@ -249,6 +278,17 @@ def json_bytes(value):
     return json.dumps(value, ensure_ascii=False, indent=2).encode('utf-8')
 
 
+def encode_plate_tiff(mask, dpi):
+    target = io.BytesIO()
+    mono = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8)).convert('1', dither=Image.Dither.NONE)
+    mono.save(target, format='TIFF', compression='group4', dpi=dpi)
+    data = target.getvalue()
+    with Image.open(io.BytesIO(data)) as readback:
+        if readback.mode != '1' or not np.array_equal(~np.asarray(readback), mask):
+            raise RuntimeError('TIFF 工艺区域校验失败')
+    return data
+
+
 def export_package(payload):
     project, profile, pages = validate_request(payload)
     names = SPOT_PROFILES[profile]
@@ -265,26 +305,34 @@ def export_package(payload):
         size = page['artwork'].size
         dpi = (size[0] * 25.4 / physical_width, size[1] * 25.4 / physical_height)
         for key, mask in page['masks'].items():
-            target = io.BytesIO()
-            mono = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8)).convert('1', dither=Image.Dither.NONE)
-            mono.save(target, format='TIFF', compression='group4', dpi=dpi)
-            readback = Image.open(io.BytesIO(target.getvalue()))
-            if readback.mode != '1' or not np.array_equal(~np.asarray(readback), mask):
-                raise RuntimeError('TIFF 工艺区域校验失败')
-            files[f"{page['side']}-{key}.tif"] = target.getvalue()
+            files[f"{page['side']}-{key}.tif"] = encode_plate_tiff(mask, dpi)
+        layer_reports = []
+        for index, layer in enumerate(page['layers'], start=1):
+            key, mask = layer['channel'], layer['mask']
+            stem = f"layers/{page['side']}-{index:02d}-{key}"
+            solo = {**page, 'masks': {key: mask}}
+            pdf = create_pdf(project, [solo], names, key)
+            verify_pdf(pdf, project, [solo], names, key)
+            files[f'{stem}.pdf'] = pdf
+            files[f'{stem}.tif'] = encode_plate_tiff(mask, dpi)
+            layer_reports.append({
+                'id': layer['id'], 'name': layer['name'], 'channel': key, 'spotName': names[key],
+                'variant': layer['variant'], 'regionId': layer['regionId'],
+                'inkPixels': int(mask.sum()), 'pdf': f'{stem}.pdf', 'tiff': f'{stem}.tif',
+            })
         page_reports.append({
             'side': page['side'], 'pixels': list(size), 'dpi': [round(value, 2) for value in dpi],
             'plates': {names[key]: {'coveragePercent': round(float(mask.mean()) * 100, 3),
                                     'inkPixels': int(mask.sum())}
                        for key, mask in page['masks'].items()},
-            'thresholdedMasks': page['thresholded'],
+            'thresholdedMasks': page['thresholded'], 'processLayers': layer_reports,
         })
     notices = [
         '本文件包为技术打样参考，尚未经过实际印厂 RIP 与实体打样验收。',
         '彩稿已栅格化为 DeviceCMYK 图像。通用 RGB 转 CMYK 未使用印厂 ICC，色彩需要印厂确认。',
         'PDF 为普通 PDF 1.6，未声明 PDF/X 合规，也未嵌入虚构的输出条件。',
         '工艺蒙版使用 128 阈值转为二值，PDF 与 TIFF 共用相同的二值数据。',
-        '箔版中的全部选区合并为一道箔工艺。多种箔材需在生产前另行分版。',
+        '合版 PDF 的专色按通道合并，供读版核对。layers/ 保留各工艺层，请按印厂确认的工序交付。',
     ]
     if any(min(page['dpi']) < 299 for page in page_reports):
         notices.append('部分卡面的有效分辨率低于 300 PPI，建议提升输出尺寸后重新导出。')
@@ -301,12 +349,15 @@ def export_package(payload):
         '典藏卡技术打样文件', '', f"项目  {project['name']}", f"源版本  {project['version']:g}",
         f"成品  {project['widthMm']:g} × {project['heightMm']:g} mm",
         f"出血  四周 {project['bleedMm']:g} mm", f"材料  {project['material']}",
+        f"底材反光  {project['stockReflection']}",
         '页序  ' + '、'.join('正面' if page['side'] == 'front' else '背面' for page in pages), '',
         'artwork.pdf 为 CMYK 彩稿。composite.pdf 为彩稿与命名专色合版。',
         'white.pdf、foil.pdf、clear.pdf 按实际使用工艺生成。独立版是纯 K 版。',
         '各面 TIFF 中黑色表示施作区域，白色表示空白。各版与彩稿使用同一物理坐标。',
         '未使用某道工艺的卡面在相应多页独立 PDF 中保留空白页，以维持页序。', '',
         '通道映射', *[f"{PLATE_LABELS[key]}  {names[key]}" for key in keys], '',
+        '独立工艺层', *[f"{layer['name']}  {layer['pdf']}"
+                       for page in page_reports for layer in page['processLayers']], '',
         '生产前确认', *notices,
         '请印厂确认实际材料、工序顺序、专色名称、套准容差、最小线宽、墨层和箔材要求。',
     ]
@@ -367,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(403, json_bytes({'error': '仅接受本机编辑器请求'}))
         elif path == '/api/health':
             self.respond(200, json_bytes({'status': 'ok', 'engine': PRINT_ENGINE,
-                                         'profiles': SPOT_PROFILES, 'productionApproved': False}))
+                                         'profiles': SPOT_PROFILES, 'layeredPlates': True, 'productionApproved': False}))
         elif path == '/api/projects' or path.startswith('/api/projects/'):
             self.handle_projects(path)
         elif path == '/api' or path.startswith('/api/'):

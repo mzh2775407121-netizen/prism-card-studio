@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, X } from 'lucide-react';
-import type { PreviewStyle } from './albumSurface';
-import { inspectorRarity, loadInspectorFace, type InspectorFace } from './albumInspectorAssets';
-import type { Project, SideName } from './model';
+import { loadInspectorFace, type InspectorFace } from './albumInspectorAssets';
+import { getCardCornerRadiusMm, type Project, type SideName } from './model';
 import './album-materials.css';
 import './album-preview.css';
 
@@ -50,19 +49,17 @@ function setLight(element: HTMLElement, x: number, y: number, opacity: number) {
 
 function CardFace({ face, artwork, visible }: { face: SideName; artwork: InspectorFace; visible: boolean }) {
   return <div className={'card__front inspector-card-face ' + face} aria-hidden={!visible}
-    style={{ '--mask': 'url("' + artwork.mask + '")', '--glare-mask': 'url("' + artwork.glare + '")' } as CSSProperties}>
+    style={{ '--glare-mask': 'url("' + artwork.glare + '")' } as CSSProperties}>
     <img src={artwork.artwork} alt={face === 'front' ? '卡片正面' : '卡片背面'} draggable={false}/>
-    <div className="card__shine"/>
     <div className="card__glare"/>
   </div>;
 }
 
-export default function AlbumPreview({ project, initialSide, cardBoundsRef, material, style, onClose, onExport }: {
+export default function AlbumPreview({ project, initialSide, cardBoundsRef, material, onClose, onExport }: {
   project: Project;
   initialSide: SideName;
   cardBoundsRef: RefObject<HTMLDivElement | null>;
   material?: string;
-  style: PreviewStyle;
   onClose: () => void;
   onExport: () => void;
 }) {
@@ -99,7 +96,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     const target = flight.current;
     const source = cardBoundsRef.current?.getBoundingClientRect();
     const canvas = cardBoundsRef.current?.parentElement?.getBoundingClientRect();
-    const visible = source && canvas &&
+    const visible = source && canvas && source.width <= canvas.width * 1.5 && source.height <= canvas.height * 1.5 &&
       Math.max(source.left, canvas.left, 0) < Math.min(source.right, canvas.right, window.innerWidth) &&
       Math.max(source.top, canvas.top, 0) < Math.min(source.bottom, canvas.bottom, window.innerHeight);
     if (!rect || !target?.offsetWidth || !target.offsetHeight || !source || !visible) {
@@ -192,12 +189,12 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
 
   useEffect(() => {
     let live = true;
-    Promise.all([loadInspectorFace(project, 'front', style), loadInspectorFace(project, 'back', style)])
+    Promise.all([loadInspectorFace(project, 'front'), loadInspectorFace(project, 'back')])
       .then(([front, back]) => {
         if (live) setFaces({ front, back });
       }).catch(() => { if (live) setPhase('error'); });
     return () => { live = false; };
-  }, [project, style, retry]);
+  }, [project, retry]);
 
   useLayoutEffect(() => {
     const target = flight.current;
@@ -309,10 +306,10 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     animate();
   }
 
+  const radius = getCardCornerRadiusMm(project);
   const previewVariables = {
+    '--card-radius': `${radius / project.widthMm * 100}% / ${radius / project.heightMm * 100}%`,
     '--card-aspect': project.widthMm / project.heightMm,
-    '--foil': style === 'geometric' ? 'url("/assets/album/geometric.png")' : 'url("/assets/album/glitter.png")',
-    '--cosmosbg': 'center center',
   } as CSSProperties;
   return createPortal(
     <div className="prism-card-inspector inspector-backdrop source-popover" data-phase={phase} onClick={event => {
@@ -330,7 +327,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
           {phase === 'error' && !faces ? <button className="inspector-retry" onClick={() => { setPhase('loading'); setRetry(n => n + 1); }}>卡面载入失败，重试</button>
             : !faces ? <span role="status" className="inspector-loading">正在载入卡面…</span>
             : <div ref={flight} className="card-flight">
-              <div className="card interactive active interacting masked water holo-inspect" data-rarity={inspectorRarity[style]} data-style={style}>
+              <div className="card interactive active interacting masked water holo-inspect" >
                 <div className="card__translater">
                   <button ref={rotor} className="card__rotator" aria-label="收回卡片" onClick={event => {
                     if (event.detail && dragged.current) { dragged.current = false; return; }

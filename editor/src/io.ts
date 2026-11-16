@@ -143,18 +143,37 @@ function validateNode(node: unknown): asserts node is CardNode {
   if (node.type === 'image') assert(text(node.src, MAX_IMAGE_BYTES * 1.5) && node.src.length > 0, '图片素材缺失。');
   if (node.type === 'text') assert(text(node.text, 50_000) && number(node.fontSize, 0.1, 10_000), '文字内容或字号无效。');
   if (node.lineHeight !== undefined) assert(number(node.lineHeight, .8, 3), '行距数据无效。');
+  if (node.letterSpacing !== undefined) assert(number(node.letterSpacing, -100, 100), '字距数据无效。');
+  if (node.cornerRadius !== undefined) assert(number(node.cornerRadius, 0, 100_000), '圆角数据无效。');
   if (node.strokeWidth !== undefined) assert(number(node.strokeWidth, 0, 1000), '描边宽度无效。');
   for (const field of ['stroke', 'fontFamily', 'fontStyle', 'align', 'blend', 'groupId']) {
     if (node[field] !== undefined) assert(text(node[field]), '图层属性无效。');
   }
+  if (node.clipRegionId !== undefined) assert(text(node.clipRegionId), '图层蒙版标识无效。');
+  if (node.maskInk !== undefined) assert(node.maskInk === 'alpha' || node.maskInk === 'dark', '图片蒙版提取方式无效。');
+  if (node.polygon !== undefined) {
+    assert(Array.isArray(node.polygon) && node.polygon.length >= 6 && node.polygon.length <= 512
+      && node.polygon.length % 2 === 0 && node.polygon.every(value => number(value, 0, 1)), '形状路径无效。');
+  }
+  if (node.gradient !== undefined) {
+    const g = node.gradient;
+    assert(isObject(g) && number(g.angle) && Array.isArray(g.stops) && g.stops.length >= 2 && g.stops.length <= 12
+      && g.stops.every(stop => Array.isArray(stop) && stop.length === 2 && number(stop[0],0,1)
+        && typeof stop[1] === 'string' && CSS.supports('color',stop[1])), '形状渐变无效。');
+  }
   if (node.crop !== undefined) {
     const crop = node.crop;
     assert(isObject(crop) && number(crop.x, 0) && number(crop.y, 0) && number(crop.width, 0.001) && number(crop.height, 0.001), '图片裁切数据无效。');
+    if (crop.space !== undefined) assert(crop.space === 'source' && crop.x + crop.width <= 1.00001 && crop.y + crop.height <= 1.00001, '图片裁切超出原图。');
   }
 }
 
 function validateSide(value: unknown): asserts value is CardSide {
   assert(isObject(value), '卡片正反面数据不完整。');
+  if (value.reference !== undefined) {
+    const reference = value.reference;
+    assert(isObject(reference) && text(reference.name) && text(reference.src, MAX_IMAGE_BYTES * 1.5) && reference.src.length > 0, '参考图数据无效。');
+  }
   assert(Array.isArray(value.nodes) && value.nodes.length <= 1000, '图层数据无效或超过 1000 个图层。');
   assert(Array.isArray(value.regions) && value.regions.length <= 1000, '区域数据无效。');
   assert(Array.isArray(value.effects) && value.effects.length <= 1000, '效果数据无效。');
@@ -208,12 +227,27 @@ function validateSide(value: unknown): asserts value is CardSide {
     return depth;
   }
   for (const region of value.regions) if (region.kind === 'union') sourceDepth(region.id, new Set());
+  for (const node of value.nodes) {
+    if (node.clipRegionId !== undefined) assert(regionIds.has(node.clipRegionId), '彩稿图层的蒙版缺失。');
+  }
   const effectIds = new Set<string>();
   for (const effect of value.effects) {
     assert(isObject(effect) && text(effect.id) && effect.id.length > 0 && !effectIds.has(effect.id), '效果标识缺失或重复。');
     effectIds.add(effect.id);
     assert(text(effect.name) && ['holo', 'gold', 'silver', 'gloss', 'emboss', 'grain', 'white'].includes(String(effect.type)), '效果类型无效。');
     assert(text(effect.regionId) && regionIds.has(effect.regionId), '效果引用的作用区域已缺失。');
+    if (effect.process !== undefined) assert(['reflection','white','foil','varnish'].includes(String(effect.process)), '工艺类型无效。');
+    if (effect.pattern !== undefined) assert(['linear','radial','grain'].includes(String(effect.pattern)), '闪光纹样无效。');
+    if (effect.flashStyle !== undefined) assert(['cosmos','geometric','glitter','linear','radial'].includes(String(effect.flashStyle)), '局部闪光样式无效。');
+    if (effect.maskContent !== undefined) {
+      assert(Array.isArray(effect.maskContent) && effect.maskContent.length <= 1000, '工艺蒙版内容无效。');
+      const maskIds = new Set();
+      for (const item of effect.maskContent) {
+        validateNode(item);
+        assert(!maskIds.has(item.id) && !item.clipRegionId, '工艺蒙版内容标识重复或引用了其他蒙版。');
+        maskIds.add(item.id);
+      }
+    }
     assert(number(effect.opacity, 0, 1) && number(effect.angle) && typeof effect.visible === 'boolean', '效果参数无效。');
   }
 }
@@ -222,16 +256,21 @@ function validateProject(value: unknown): asserts value is Project {
   assert(isObject(value) && text(value.id) && value.id.length > 0 && text(value.name, 500), '项目名称或标识无效。');
   assert(number(value.version, 1) && Number.isInteger(value.version), '项目版本号无效。');
   assert(number(value.widthMm, 10, 500) && number(value.heightMm, 10, 500) && number(value.bleedMm, 0, 20), '卡片尺寸应在 10–500 mm 之间，出血在 0–20 mm 之间。');
+  if (value.cornerRadiusMm !== undefined) assert(number(value.cornerRadiusMm, 0, Math.min(value.widthMm, value.heightMm) / 2), '卡片圆角半径超出范围。');
   assert(text(value.material) && number(value.updatedAt, 0, Number.MAX_SAFE_INTEGER), '项目材质或保存时间无效。');
   if (value.previewStyle !== undefined) assert(['cosmos', 'geometric', 'glitter', 'original'].includes(String(value.previewStyle)), '预览样式无效。');
+  if (value.stockReflection !== undefined) assert(['none','mirror','rainbow','radial'].includes(String(value.stockReflection)), '底材反光类型无效。');
   validateSide(value.front);
   validateSide(value.back);
 }
 
-function imageNodes(project: Project): CardNode[] {
+function imageNodes(project: Project): { src?: string }[] {
   return [...new Set([project.front, project.back].flatMap(side => [
-    ...side.nodes, ...side.regions.flatMap(region => region.snapshot ? [region.snapshot] : []),
-  ]))].filter(node => node.type === 'image');
+    ...side.nodes.filter(node => node.type === 'image'),
+    ...side.effects.flatMap(effect => (effect.maskContent || []).filter(node => node.type === 'image')),
+    ...side.regions.flatMap(region => region.snapshot?.type === 'image' ? [region.snapshot] : []),
+    ...(side.reference ? [side.reference] : []),
+  ]))];
 }
 
 async function localSource(src: string): Promise<Uint8Array> {
