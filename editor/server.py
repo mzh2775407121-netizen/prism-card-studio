@@ -1,4 +1,4 @@
-"""Local print export service for the collectible-card editor demo.
+"""Local print export service for Prism.
 
 Each request supplies a frozen artwork snapshot and aligned black-on-white
 process masks. The service emits real technical separations, without claiming
@@ -44,6 +44,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 EXPORT_SLOTS = threading.BoundedSemaphore(2)
+PRINT_ENGINE = 'prism-print/1.0'
 DIST_DIRECTORY = Path(__file__).resolve().parent / 'dist'
 SPOT_PROFILES = {
     'standard': {'white': 'White', 'foil': 'Foil_Gold', 'clear': 'Spot_UV'},
@@ -180,7 +181,7 @@ def create_pdf(project, pages, names, output):
     target = io.BytesIO()
     canvas = Canvas(target, pagesize=size, invariant=True, pdfVersion=(1, 6))
     canvas.setTitle(f"{project['name']} / {output}")
-    canvas.setAuthor('Card Atelier Demo')
+    canvas.setAuthor('Prism')
     page_masks = []
     for page in pages:
         masks = {}
@@ -288,7 +289,7 @@ def export_package(payload):
     if any(min(page['dpi']) < 299 for page in page_reports):
         notices.append('部分卡面的有效分辨率低于 300 PPI，建议提升输出尺寸后重新导出。')
     report = {
-        'schemaVersion': 1, 'engine': 'card-atelier-demo/1.0',
+        'schemaVersion': 1, 'engine': PRINT_ENGINE,
         'createdAt': datetime.now(timezone.utc).isoformat(), 'project': project,
         'profile': profile, 'spotNames': {key: names[key] for key in keys},
         'verificationStatus': 'software-structure-checked', 'productionApproved': False,
@@ -323,7 +324,7 @@ def export_package(payload):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'CardAtelier/1.0'
+    server_version = 'Prism/1.0'
 
     def origin_allowed(self):
         origin = self.headers.get('Origin')
@@ -365,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.origin_allowed():
             self.respond(403, json_bytes({'error': '仅接受本机编辑器请求'}))
         elif path == '/api/health':
-            self.respond(200, json_bytes({'status': 'ok', 'engine': 'card-atelier-demo/1.0',
+            self.respond(200, json_bytes({'status': 'ok', 'engine': PRINT_ENGINE,
                                          'profiles': SPOT_PROFILES, 'productionApproved': False}))
         elif path == '/api/projects' or path.startswith('/api/projects/'):
             self.handle_projects(path)
@@ -498,7 +499,7 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.projects = store
     server.daemon_threads = True
-    print(f'Print service ready on http://127.0.0.1:{args.port}', flush=True)
+    print(f'Prism ready on http://127.0.0.1:{args.port}', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

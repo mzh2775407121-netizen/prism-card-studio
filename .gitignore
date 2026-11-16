@@ -6,7 +6,7 @@
 *.zip
 .data/
 /output/
-/demo/verification/
+/editor/verification/
 
 # Local configuration, installed dependencies, and generated files
 .env

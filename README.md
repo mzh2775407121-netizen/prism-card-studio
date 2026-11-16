@@ -24,7 +24,7 @@ Prism 是一款本机制卡工具。创作者可以从模板或空白开始，�
 需要 Node.js 22、pnpm 和 Python 3.12。从仓库根目录执行以下命令。
 
 ```sh
-cd demo
+cd editor
 pnpm install --frozen-lockfile
 pnpm build
 python3 -m venv .venv
@@ -33,4 +33,4 @@ python -m pip install -r requirements.txt
 python server.py --data-dir .data
 ```
 
-打开 [http://127.0.0.1:4174/](http://127.0.0.1:4174/)。项目数据库在 `demo/.data/`。更多说明见 [运行和项目数据](demo/README.md)。图片、字体和卡册纹理的来源见 [素材来源](demo/public/assets/assets-sources.txt) 和 [卡册素材来源](demo/public/assets/album/来源.txt)。
+打开 [http://127.0.0.1:4174/](http://127.0.0.1:4174/)。按上述命令启动时，项目数据库在 `editor/.data/`。更多说明见 [运行和项目数据](editor/README.md)。图片、字体和卡册纹理的来源见 [素材来源](editor/public/assets/assets-sources.txt) 和 [卡册素材来源](editor/public/assets/album/来源.txt)。
