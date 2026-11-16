@@ -1,1 +1,33 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="theme-color" content="#f6f6f4"/><title>Prism · 典藏卡编辑器</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f6f4" />
+    <title>Prism · 典藏卡编辑器</title>
+    <script>
+      if (location.protocol === 'file:') {
+        document.documentElement.classList.add('local-file');
+        const editorUrl = 'http://127.0.0.1:4174/';
+        const serviceAsset = new Image();
+        serviceAsset.onload = () => location.replace(editorUrl);
+        serviceAsset.src = editorUrl + 'assets/album/grain.webp';
+      }
+    </script>
+    <style>
+      .local-file body { margin: 0; background: #f6f6f4; color: #20231f; font: 16px/1.6 system-ui, sans-serif; }
+      .local-file .startup { display: block; max-width: 440px; margin: 16vh auto 0; padding: 0 24px; }
+      .startup h1 { font-size: 24px; line-height: 1.3; }
+      .startup a { display: inline-block; padding: 8px 16px; background: #242a24; border-radius: 6px; color: #fff; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <main class="startup" hidden>
+      <h1>Prism · 典藏卡编辑器</h1>
+      <p>在 Mac 上，双击项目文件夹里的「启动 Prism.command」。启动后，编辑器会在浏览器中打开。</p>
+      <a href="http://127.0.0.1:4174/">打开编辑器</a>
+    </main>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

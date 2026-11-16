@@ -1,4 +1,4 @@
-Demo asset sources
+Prism asset sources
 Retrieved 2026-11-11
 
 ocean.jpg
@@ -21,7 +21,7 @@ Asset https://images.unsplash.com/photo-1562810339-dcdc1fb3f674?auto=format&fit=
 
 Photographs were downloaded from the official Unsplash image CDN. The photo listing identifies these as free images. Unsplash's license permits downloading and use for commercial and noncommercial purposes, subject to its terms. Unmodified image resale and assembling a competing stock-photo service are excluded.
 License https://unsplash.com/license
-All three images were visually inspected. They illustrate the demo templates and do not depict a manufactured card product.
+The three photographs are used in Prism's starter templates.
 
 work-sans-variable.woff2
 Work Sans, variable weight, Latin subset
