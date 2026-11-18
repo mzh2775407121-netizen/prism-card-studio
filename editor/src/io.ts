@@ -1,6 +1,9 @@
 import JSZip from 'jszip';
 import { get } from 'idb-keyval';
-import type { CardNode, CardSide, Project } from './model';
+import { PROCESS_LABELS, type CardNode, type CardSide, type Project } from './model';
+import { MAX_LAYER_GROUP_NAME_LENGTH, MAX_LAYER_GROUPS } from './layerGroups';
+import { MAX_PATH_POINTS } from './vectorPaths';
+import { DIE_SHAPES, FACE_LABELS, MANUAL_OPERATIONS } from './production';
 
 const STORE_KEY = 'prism-projects';
 const MAX_PROJECT_BYTES = 100 * 1024 * 1024;
@@ -135,36 +138,94 @@ function number(value: unknown, min = -1_000_000, max = 1_000_000): value is num
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
 }
 
+function pathCoordinate(value: unknown) {
+  return isObject(value) && number(value.x, 0, 1) && number(value.y, 0, 1);
+}
+
 function validateNode(node: unknown): asserts node is CardNode {
   assert(isObject(node) && text(node.id) && node.id.length > 0, '图层标识缺失。');
-  assert(text(node.name) && ['image', 'text', 'rect', 'ellipse', 'polygon'].includes(String(node.type)), '图层类型或名称无效。');
+  assert(text(node.name) && ['empty', 'image', 'text', 'rect', 'ellipse', 'polygon', 'line', 'path'].includes(String(node.type)), '图层类型或名称无效。');
   assert(number(node.x) && number(node.y) && number(node.width, 0.001, 100_000) && number(node.height, 0.001, 100_000) && number(node.rotation), '图层位置或尺寸无效。');
+  assert((node.flipX === undefined || typeof node.flipX === 'boolean') &&
+    (node.flipY === undefined || typeof node.flipY === 'boolean'), '图层翻转状态无效。');
   assert(number(node.opacity, 0, 1) && typeof node.visible === 'boolean' && typeof node.locked === 'boolean' && text(node.fill), '图层外观数据无效。');
   if (node.type === 'image') assert(text(node.src, MAX_IMAGE_BYTES * 1.5) && node.src.length > 0, '图片素材缺失。');
   if (node.type === 'text') assert(text(node.text, 50_000) && number(node.fontSize, 0.1, 10_000), '文字内容或字号无效。');
+  if (node.verticalAlign !== undefined) assert(node.verticalAlign === 'top' || node.verticalAlign === 'middle' || node.verticalAlign === 'bottom', '文字垂直对齐无效。');
   if (node.lineHeight !== undefined) assert(number(node.lineHeight, .8, 3), '行距数据无效。');
   if (node.letterSpacing !== undefined) assert(number(node.letterSpacing, -100, 100), '字距数据无效。');
   if (node.cornerRadius !== undefined) assert(number(node.cornerRadius, 0, 100_000), '圆角数据无效。');
   if (node.strokeWidth !== undefined) assert(number(node.strokeWidth, 0, 1000), '描边宽度无效。');
+  for (const key of ['fillOpacity', 'strokeOpacity']) {
+    if (node[key] !== undefined) assert(number(node[key], 0, 1), '填充或描边透明度无效。');
+  }
+  for (const key of ['fillHidden', 'strokeHidden']) {
+    if (node[key] !== undefined) assert(typeof node[key] === 'boolean', '填充或描边状态无效。');
+  }
+  if (node.fillMode !== undefined) assert(['solid', 'gradient', 'image'].includes(String(node.fillMode)), '填充类型无效。');
+  if (node.fillMode === 'gradient') assert(node.gradient !== undefined, '缺少渐变设置。');
+  if (node.imageFill !== undefined) {
+    const fill = node.imageFill;
+    assert(isObject(fill) && text(fill.src, MAX_IMAGE_BYTES * 1.5) && fill.src.length > 0, '图片填充素材无效。');
+    assert(fill.fit === undefined || fill.fit === 'cover' || fill.fit === 'contain', '图片填充方式无效。');
+    if (fill.crop !== undefined) validateCrop(fill.crop);
+  }
+  if (node.strokeAlign !== undefined) assert(['inside', 'center', 'outside'].includes(String(node.strokeAlign)), '描边位置无效。');
+  if (node.strokeStyle !== undefined) assert(['solid', 'dashed', 'dotted'].includes(String(node.strokeStyle)), '描边样式无效。');
   for (const field of ['stroke', 'fontFamily', 'fontStyle', 'align', 'blend', 'groupId']) {
     if (node[field] !== undefined) assert(text(node[field]), '图层属性无效。');
   }
   if (node.clipRegionId !== undefined) assert(text(node.clipRegionId), '图层蒙版标识无效。');
+  if (node.unclassified !== undefined) assert(typeof node.unclassified === 'boolean', '图层分类无效。');
   if (node.maskInk !== undefined) assert(node.maskInk === 'alpha' || node.maskInk === 'dark', '图片蒙版提取方式无效。');
   if (node.polygon !== undefined) {
     assert(Array.isArray(node.polygon) && node.polygon.length >= 6 && node.polygon.length <= 512
       && node.polygon.length % 2 === 0 && node.polygon.every(value => number(value, 0, 1)), '形状路径无效。');
+  }
+  if (node.type === 'line' || node.type === 'path') {
+    const line = node.type === 'line';
+    assert(node.pathClosed === undefined || (typeof node.pathClosed === 'boolean' && (!line || !node.pathClosed)), '路径闭合状态无效。');
+    const points = node.pathPoints;
+    assert(Array.isArray(points) && points.length >= (node.pathClosed ? 3 : 2) &&
+      points.length <= (line ? 2 : MAX_PATH_POINTS) && points.every(point => isObject(point) && pathCoordinate(point) &&
+      (point.in === undefined || (!line && pathCoordinate(point.in))) &&
+      (point.out === undefined || (!line && pathCoordinate(point.out)))), '线段或钢笔路径的锚点无效。');
   }
   if (node.gradient !== undefined) {
     const g = node.gradient;
     assert(isObject(g) && number(g.angle) && Array.isArray(g.stops) && g.stops.length >= 2 && g.stops.length <= 12
       && g.stops.every(stop => Array.isArray(stop) && stop.length === 2 && number(stop[0],0,1)
         && typeof stop[1] === 'string' && CSS.supports('color',stop[1])), '形状渐变无效。');
+    if (g.kind !== undefined) assert(g.kind === 'linear' || g.kind === 'radial', '渐变类型无效。');
+    if (g.endpoints !== undefined) assert(Array.isArray(g.endpoints) && g.endpoints.length === 2
+      && g.endpoints.every(point => Array.isArray(point) && point.length === 2 && point.every(coordinate => number(coordinate, -2, 3))), '渐变端点无效。');
   }
-  if (node.crop !== undefined) {
-    const crop = node.crop;
-    assert(isObject(crop) && number(crop.x, 0) && number(crop.y, 0) && number(crop.width, 0.001) && number(crop.height, 0.001), '图片裁切数据无效。');
-    if (crop.space !== undefined) assert(crop.space === 'source' && crop.x + crop.width <= 1.00001 && crop.y + crop.height <= 1.00001, '图片裁切超出原图。');
+  if (node.crop !== undefined) validateCrop(node.crop);
+}
+
+function validateCrop(crop: unknown) {
+  assert(isObject(crop) && number(crop.x, 0) && number(crop.y, 0) && number(crop.width, 0.001) && number(crop.height, 0.001), '图片裁切数据无效。');
+  if (crop.space !== undefined) assert(crop.space === 'source' && crop.x + crop.width <= 1.00001 && crop.y + crop.height <= 1.00001, '图片裁切超出原图。');
+}
+
+function validateLayerGroups(value: unknown, artworkIds: Set<string>, effectIds: Set<string>) {
+  assert(Array.isArray(value) && value.length <= MAX_LAYER_GROUPS, '编组数据无效。');
+  const parents = new Map<string, string | undefined>();
+  for (const group of value) {
+    assert(isObject(group) && text(group.id) && group.id.trim() && !parents.has(group.id) &&
+      !artworkIds.has(group.id) && !effectIds.has(group.id), '编组标识缺失或重复。');
+    assert(text(group.name, MAX_LAYER_GROUP_NAME_LENGTH) && group.name.trim(), '编组名称无效。');
+    assert(group.parentId === undefined || (text(group.parentId) && group.parentId.trim()), '上级编组无效。');
+    parents.set(group.id, group.parentId);
+  }
+  const checked = new Set<string>();
+  for (const groupId of parents.keys()) {
+    const chain = new Set<string>();
+    for (let id: string | undefined = groupId; id !== undefined && !checked.has(id); id = parents.get(id)) {
+      assert(parents.has(id) && !chain.has(id), '上级编组已缺失或编组存在循环引用。');
+      chain.add(id);
+    }
+    for (const id of chain) checked.add(id);
   }
 }
 
@@ -189,6 +250,7 @@ function validateSide(value: unknown): asserts value is CardSide {
     regionIds.add(region.id);
     assert(text(region.name) && ['full', 'border', 'node', 'paint', 'rect', 'ellipse', 'polygon', 'union'].includes(String(region.kind)), '区域类型无效。');
     assert(['fixed', 'follow'].includes(String(region.binding)) && typeof region.inverted === 'boolean', '区域定位数据无效。');
+    if (region.groupMotionCopy !== undefined) assert(region.groupMotionCopy === true, '蒙版组合数据无效。');
     if (region.snapshot !== undefined) validateNode(region.snapshot);
     if (region.bounds !== undefined) {
       const bounds = region.bounds;
@@ -236,9 +298,10 @@ function validateSide(value: unknown): asserts value is CardSide {
     effectIds.add(effect.id);
     assert(text(effect.name) && ['holo', 'gold', 'silver', 'gloss', 'emboss', 'grain', 'white'].includes(String(effect.type)), '效果类型无效。');
     assert(text(effect.regionId) && regionIds.has(effect.regionId), '效果引用的作用区域已缺失。');
-    if (effect.process !== undefined) assert(['reflection','white','foil','varnish'].includes(String(effect.process)), '工艺类型无效。');
+    if (effect.process !== undefined) assert(Object.hasOwn(PROCESS_LABELS, String(effect.process)), '工艺类型无效。');
     if (effect.pattern !== undefined) assert(['linear','radial','grain'].includes(String(effect.pattern)), '闪光纹样无效。');
     if (effect.flashStyle !== undefined) assert(['cosmos','geometric','glitter','linear','radial'].includes(String(effect.flashStyle)), '局部闪光样式无效。');
+    if (effect.groupId !== undefined) assert(text(effect.groupId) && effect.groupId.trim(), '工艺图层编组标识无效。');
     if (effect.maskContent !== undefined) {
       assert(Array.isArray(effect.maskContent) && effect.maskContent.length <= 1000, '工艺蒙版内容无效。');
       const maskIds = new Set();
@@ -250,6 +313,7 @@ function validateSide(value: unknown): asserts value is CardSide {
     }
     assert(number(effect.opacity, 0, 1) && number(effect.angle) && typeof effect.visible === 'boolean', '效果参数无效。');
   }
+  if (value.groups !== undefined) validateLayerGroups(value.groups, ids, effectIds);
 }
 
 function validateProject(value: unknown): asserts value is Project {
@@ -260,17 +324,36 @@ function validateProject(value: unknown): asserts value is Project {
   assert(text(value.material) && number(value.updatedAt, 0, Number.MAX_SAFE_INTEGER), '项目材质或保存时间无效。');
   if (value.previewStyle !== undefined) assert(['cosmos', 'geometric', 'glitter', 'original'].includes(String(value.previewStyle)), '预览样式无效。');
   if (value.stockReflection !== undefined) assert(['none','mirror','rainbow','radial'].includes(String(value.stockReflection)), '底材反光类型无效。');
+  if (value.production !== undefined) {
+    const plan = value.production;
+    assert(isObject(plan) && Object.hasOwn(DIE_SHAPES, String(plan.dieShape)) && Array.isArray(plan.steps) && plan.steps.length <= 250, '工艺单格式无效。');
+    for (const [key, limit] of [['printer', 120], ['stockCode', 120], ['note', 1200]] as const) {
+      assert(plan[key] === undefined || text(plan[key], limit), '工艺单说明无效。');
+    }
+    const ids = new Set<string>();
+    for (const row of plan.steps) {
+      assert(isObject(row) && text(row.id, 330) && !!row.id && !ids.has(row.id) &&
+        (['artwork', 'layer', 'die'].includes(String(row.kind)) || Object.hasOwn(MANUAL_OPERATIONS, String(row.kind))) &&
+        Object.hasOwn(FACE_LABELS, String(row.face)) && text(row.name, 300) &&
+        (row.layerId === undefined || text(row.layerId)) &&
+        (row.method === undefined || text(row.method, 120)) && (row.note === undefined || text(row.note, 600)), '工序内容无效。');
+      ids.add(row.id);
+    }
+  }
   validateSide(value.front);
   validateSide(value.back);
 }
 
 function imageNodes(project: Project): { src?: string }[] {
-  return [...new Set([project.front, project.back].flatMap(side => [
-    ...side.nodes.filter(node => node.type === 'image'),
-    ...side.effects.flatMap(effect => (effect.maskContent || []).filter(node => node.type === 'image')),
-    ...side.regions.flatMap(region => region.snapshot?.type === 'image' ? [region.snapshot] : []),
-    ...(side.reference ? [side.reference] : []),
-  ]))];
+  const assets = [project.front, project.back].flatMap(side => {
+    const nodes = [...side.nodes, ...side.effects.flatMap(effect => effect.maskContent ?? []),
+      ...side.regions.flatMap(region => region.snapshot ? [region.snapshot] : [])];
+    return [...nodes.flatMap(node => [
+      ...(node.type === 'image' ? [node] : []),
+      ...(node.imageFill ? [node.imageFill] : []),
+    ]), ...(side.reference ? [side.reference] : [])];
+  });
+  return [...new Set(assets)];
 }
 
 async function localSource(src: string): Promise<Uint8Array> {

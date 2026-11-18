@@ -1,5 +1,5 @@
 .crop-editor { display: grid; gap: 12px; }
-.crop-source { position: relative; align-self: center; max-width: 100%; margin-inline: auto; overflow: hidden; background: #303331; }
+.crop-source { position: relative; align-self: center; max-width: 100%; margin-inline: auto; overflow: hidden; background: #303030; }
 .crop-source > img { width: 100%; height: 100%; display: block; user-select: none; }
 .crop-frame { position: absolute; outline: 1px solid #fff; box-shadow: 0 0 0 1000px #1119; cursor: grab; touch-action: none; }
 .crop-frame:active { cursor: grabbing; }
@@ -10,14 +10,8 @@
 .crop-actions > :first-child { margin-right: auto; }
 .image-inspector canvas { display: block; max-width: 100%; max-height: 128px; object-fit: contain; margin-inline: auto; }
 .layer-search { display: flex; align-items: center; gap: 6px; margin-block: 4px 8px; border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; color: var(--muted); }
-.layer-search:focus-within { border-color: #4a8d76; }
+.layer-search:focus-within { border-color: var(--prism-blue); }
 .layer-search input { min-width: 0; width: 100%; border: 0; background: transparent; padding: 7px 0; font: inherit; font-size: 12px; }
 .layer-search input:focus-visible { outline: 0; }
-.reference-settings { padding-top: 10px; }
-.reference-settings > .wide-button { margin-top: 6px; }
-.reference-settings figure { margin: 0 0 10px; }
-.reference-settings img { max-width: 100%; max-height: 152px; display: block; margin-inline: auto; }
-.reference-settings figcaption { color: var(--muted); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
-.reference-actions { display: flex; gap: 6px; }
 .alignment-tools { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 3px; margin: 6px 0 12px; }
 .alignment-tools .icon-button { width: 100%; min-width: 0; }

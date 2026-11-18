@@ -1,7 +1,13 @@
 export type SideName = 'front' | 'back';
 export type TemplateName = 'ocean' | 'botanical' | 'editorial' | 'blank';
 export type EffectType = 'holo' | 'gold' | 'silver' | 'gloss' | 'emboss' | 'grain' | 'white';
-export type ProcessKind = 'reflection' | 'white' | 'foil' | 'varnish';
+export const PROCESS_LABELS = {
+  reflection: '局部闪光', white: '白墨', foil: '箔版', varnish: '光油',
+  primer: '底涂', spot: '专色', emboss: '压凸', deboss: '压凹',
+} as const;
+export type ProcessKind = keyof typeof PROCESS_LABELS;
+export type PrintChannel = Exclude<ProcessKind, 'reflection' | 'varnish'> | 'clear';
+export const PRINT_CHANNELS: PrintChannel[] = ['primer', 'white', 'spot', 'foil', 'clear', 'emboss', 'deboss'];
 export type StockReflection = 'none' | 'mirror' | 'rainbow' | 'radial';
 export const FLASH_STYLES = {
   cosmos: {label:'星空闪',texture:'cosmos-bottom.png'},
@@ -12,18 +18,38 @@ export const FLASH_STYLES = {
 } as const;
 export type FlashStyle = keyof typeof FLASH_STYLES;
 export interface ImageCrop { x: number; y: number; width: number; height: number; space?: 'source' }
+export interface ImageFill { src: string; fit?: 'cover' | 'contain'; crop?: ImageCrop }
+export type GradientPoint = [number, number];
+export interface LayerGradient {
+  kind?: 'linear' | 'radial';
+  angle: number;
+  stops: [number, string][];
+  endpoints?: [GradientPoint, GradientPoint];
+}
+export interface PathCoordinate { x: number; y: number }
+export interface PathPoint extends PathCoordinate { in?: PathCoordinate; out?: PathCoordinate }
 export interface CardNode {
-  id: string; name: string; type: 'image' | 'text' | 'rect' | 'ellipse' | 'polygon';
+  id: string; name: string; type: 'empty' | 'image' | 'text' | 'rect' | 'ellipse' | 'polygon' | 'line' | 'path';
   x: number; y: number; width: number; height: number; rotation: number;
+  flipX?: boolean; flipY?: boolean;
   opacity: number; visible: boolean; locked: boolean; fill: string;
   stroke?: string; strokeWidth?: number; text?: string; fontSize?: number;
+  fillOpacity?: number; fillHidden?: boolean;
+  fillMode?: 'solid' | 'gradient' | 'image';
+  imageFill?: ImageFill;
+  strokeOpacity?: number; strokeHidden?: boolean;
+  strokeAlign?: 'inside' | 'center' | 'outside'; strokeStyle?: 'solid' | 'dashed' | 'dotted';
   fontFamily?: string; fontStyle?: string; align?: string; src?: string;
+  verticalAlign?: 'top' | 'middle' | 'bottom';
   crop?: ImageCrop;
   blend?: string; lineHeight?: number; letterSpacing?: number; cornerRadius?: number; groupId?: string;
   clipRegionId?: string;
+  unclassified?: boolean;
   maskInk?: 'alpha' | 'dark';
   polygon?: number[];
-  gradient?: { angle: number; stops: [number, string][] };
+  pathPoints?: PathPoint[];
+  pathClosed?: boolean;
+  gradient?: LayerGradient;
 }
 export interface Stroke { points: number[]; size: number; erase: boolean }
 export interface Region {
@@ -33,6 +59,8 @@ export interface Region {
   snapshot?: CardNode;
   points?: number[];
   sources?: string[];
+  groupMotionCopy?: true;
+  maskSource?: true;
 }
 export interface Effect {
   id: string; name: string; type: EffectType; regionId: string;
@@ -41,13 +69,22 @@ export interface Effect {
   pattern?: 'linear' | 'radial' | 'grain';
   flashStyle?: FlashStyle;
   maskContent?: CardNode[];
+  groupId?: string;
 }
-export interface CardSide { nodes: CardNode[]; regions: Region[]; effects: Effect[]; reference?: { src: string; name: string } }
+export interface LayerGroup { id: string; name: string; parentId?: string }
+export interface CardSide {
+  nodes: CardNode[];
+  regions: Region[];
+  effects: Effect[];
+  groups?: LayerGroup[];
+  reference?: { src: string; name: string };
+}
 export interface Project {
   id: string; name: string; version: number; widthMm: number; heightMm: number;
   bleedMm: number; material: string; previewStyle?: 'cosmos' | 'geometric' | 'glitter' | 'original'; front: CardSide; back: CardSide; updatedAt: number;
   cornerRadiusMm?: number;
   stockReflection?: StockReflection;
+  production?: import('./production').ProductionPlan;
 }
 
 export const DEFAULT_CARD_CORNER_MM = 1.8;
@@ -56,9 +93,6 @@ export function getCardCornerRadiusMm(project: Pick<Project, 'widthMm' | 'height
   return Math.max(0, Math.min(project.cornerRadiusMm ?? DEFAULT_CARD_CORNER_MM, project.widthMm / 2, project.heightMm / 2));
 }
 
-export const PROCESS_LABELS: Record<ProcessKind, string> = {
-  reflection: '局部闪光', white: '白墨', foil: '箔版', varnish: '光油',
-};
 export const STOCK_REFLECTIONS: Record<StockReflection, string> = {
   none: '无反光', mirror: '银色镜面', rainbow: '虹彩镭射', radial: '放射镭射',
 };
@@ -81,7 +115,7 @@ export function getFlashStyle(project: Project, effect: Effect): FlashStyle {
   return project.previewStyle && project.previewStyle !== 'original' ? project.previewStyle : 'linear';
 }
 
-export function plateFor(effect: Effect): 'white' | 'foil' | 'clear' | undefined {
+export function plateFor(effect: Effect): PrintChannel | undefined {
   const kind = processKind(effect);
   return kind === 'varnish' ? 'clear' : kind === 'reflection' ? undefined : kind;
 }

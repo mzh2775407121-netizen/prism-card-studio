@@ -10,13 +10,13 @@
   --preview-padding: 22px;
   --preview-arena-height: clamp(130px, min(78svh, 100svh - 206px), 820px);
   padding: var(--preview-padding);
-  background: #e8e9e3;
-  color: #293229;
-  --inspector-muted: #4b584d;
+  background: #e9e9e9;
+  color: #292929;
+  --inspector-muted: #515151;
   transition: background .22s ease-out;
 }
-.prism-card-inspector[data-phase="loading"] { background: #e8e9e3ad; }
-.prism-card-inspector[data-phase="closing"] { background: #e8e9e300; }
+.prism-card-inspector[data-phase="loading"] { background: #e9e9e9ad; }
+.prism-card-inspector[data-phase="closing"] { background: #e9e9e900; }
 .prism-card-inspector .inspector { width: min(600px, 100%); position: relative; }
 .prism-card-inspector .inspector-top {
   position: relative;
@@ -38,8 +38,8 @@
   border-radius: 50%;
   transition: background .2s;
 }
-.prism-card-inspector .inspector-icon:hover:not(:disabled) { background: #d9ded2; }
-.prism-card-inspector .close-button { background: #daddd3; }
+.prism-card-inspector .inspector-icon:hover:not(:disabled) { background: #d9d9d9; }
+.prism-card-inspector .close-button { background: #dcdcdc; }
 .prism-card-inspector .inspect-arena {
   height: min(var(--preview-arena-height),
     calc((min(600px, 100vw - 2 * var(--preview-padding)) - 12px) / var(--card-aspect) + 20px));
@@ -89,7 +89,7 @@
     0 0 40px -30px var(--card-glow), 0 0 50px -20px var(--card-glow);
 }
 .prism-card-inspector .card-flight .card__rotator:focus-visible {
-  outline: 2px solid #4a8d76;
+  outline: 2px solid var(--prism-blue);
   outline-offset: 5px;
 }
 .prism-card-inspector .card-flight .inspector-card-face {
@@ -97,7 +97,7 @@
   -webkit-backface-visibility: hidden;
   isolation: isolate;
   border-radius: var(--card-radius);
-  background-color: #20251c;
+  background-color: #202020;
   --clip: none;
   --clip-stage: none;
   --clip-trainer: none;
@@ -162,16 +162,19 @@
   padding: 4px 8px;
   background: transparent;
   border: 1px solid transparent;
-  color: #334c3b;
+  color: #303030;
   font-size: 12px;
   white-space: nowrap;
   cursor: pointer;
 }
 .prism-card-inspector .inspector-text:hover,
-.prism-card-inspector .inspector-text[aria-pressed="true"],
 .prism-card-inspector .inspector-retry:hover {
-  border-color: #c5cec1;
-  background: #e2e7dd;
+  border-color: #cdcdcd;
+  background: #e4e4e4;
+}
+.prism-card-inspector .inspector-text[aria-pressed="true"] {
+  border-color: var(--prism-blue);
+  background: var(--prism-selected-surface);
 }
 @media (max-width: 650px) {
   .prism-card-inspector.inspector-backdrop { --preview-padding: 18px; }

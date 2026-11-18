@@ -44,18 +44,28 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 EXPORT_SLOTS = threading.BoundedSemaphore(2)
-PRINT_ENGINE = 'prism-print/1.1'
+PRINT_ENGINE = 'prism-print/1.2'
 DIST_DIRECTORY = Path(__file__).resolve().parent / 'dist'
 SPOT_PROFILES = {
-    'standard': {'white': 'White', 'foil': 'Foil_Gold', 'clear': 'Spot_UV'},
-    'alternate': {'white': 'OPW', 'foil': 'FOIL', 'clear': 'CLEAR'},
+    'standard': {'white': 'White', 'foil': 'Foil_Gold', 'clear': 'Spot_UV',
+                 'primer': 'Primer', 'spot': 'Spot_Ink', 'emboss': 'Emboss', 'deboss': 'Deboss'},
+    'alternate': {'white': 'OPW', 'foil': 'FOIL', 'clear': 'CLEAR',
+                  'primer': 'PRIMER', 'spot': 'SPOT_INK', 'emboss': 'EMBOSS', 'deboss': 'DEBOSS'},
 }
 ALTERNATES = {
     'white': (0, 0, 0, 0),
     'foil': (0, 0.3, 0.85, 0.1),
     'clear': (0, 0, 0, 0),
+    'primer': (0, 0, 0, 0),
+    'spot': (0.2, 0.8, 0, 0),
+    'emboss': (0, 0, 0, 0),
+    'deboss': (0, 0, 0, 0),
 }
-PLATE_LABELS = {'white': '白墨', 'foil': '箔', 'clear': '光油'}
+PLATE_LABELS = {'white': '白墨', 'foil': '箔', 'clear': '光油', 'primer': '底涂',
+                'spot': '专色', 'emboss': '压凸', 'deboss': '压凹'}
+MANUAL_OPERATIONS = {'lamination': '覆膜', 'coating': '全幅涂布', 'edge': '边缘处理',
+                     'inspection': '质检与包装', 'custom': '其他工序'}
+FACE_LABELS = {'front': '正面', 'back': '背面', 'both': '整卡'}
 
 
 class ExportError(ValueError):
@@ -141,7 +151,7 @@ def validate_request(payload):
         raw_plates = raw_page.get('plates', {})
         raw_layers = raw_page.get('layers')
         if not isinstance(raw_plates, dict) or set(raw_plates) - set(ALTERNATES):
-            raise ExportError('仅支持 white、foil、clear 工艺版')
+            raise ExportError('存在当前版本无法识别的工艺通道')
         if raw_layers is not None and (raw_plates or not isinstance(raw_layers, list) or len(raw_layers) > 64):
             raise ExportError('每面最多支持 64 个独立工艺层')
         masks = {}
@@ -274,6 +284,135 @@ def verify_pdf(data, project, pages, names, kind):
                 raise RuntimeError('PDF 叠印属性校验失败')
 
 
+def create_die(project, shape, radius):
+    width, height, bleed = (project[key] for key in ('widthMm', 'heightMm', 'bleedMm'))
+    full_w, full_h = width + 2 * bleed, height + 2 * bleed
+    width_pt, height_pt, inset = width * mm, height * mm, bleed * mm
+    buffer = io.BytesIO()
+    canvas = Canvas(buffer, pagesize=(full_w * mm, full_h * mm), invariant=True, pdfVersion=(1, 6))
+    canvas.setTitle(f"{project['name']} / CutContour")
+    canvas.setStrokeColor(CMYKColorSep(0, 1, 0, 0, spotName='CutContour'))
+    canvas.setStrokeOverprint(True)
+    canvas.setLineWidth(.25)
+    if shape == 'ellipse':
+        canvas.ellipse(inset, inset, inset + width_pt, inset + height_pt, stroke=1, fill=0)
+        geometry = f'<ellipse cx="{bleed + width / 2:.8f}" cy="{bleed + height / 2:.8f}" rx="{width / 2:.8f}" ry="{height / 2:.8f}"/>'
+    else:
+        radius = radius if shape == 'card' else 0
+        if radius:
+            canvas.roundRect(inset, inset, width_pt, height_pt, radius * mm, stroke=1, fill=0)
+        else:
+            canvas.rect(inset, inset, width_pt, height_pt, stroke=1, fill=0)
+        geometry = (f'<rect x="{bleed:.8f}" y="{bleed:.8f}" width="{width:.8f}" height="{height:.8f}"'
+                    f' rx="{radius:.8f}" ry="{radius:.8f}"/>')
+    canvas.showPage()
+    canvas.save()
+    writer = PdfWriter(clone_from=PdfReader(buffer))
+    writer.pages[0].trimbox = RectangleObject([inset, inset, inset + width_pt, inset + height_pt])
+    writer.pages[0].bleedbox = RectangleObject([0, 0, full_w * mm, full_h * mm])
+    pdf = io.BytesIO()
+    writer.write(pdf)
+    data = pdf.getvalue()
+    verify_pdf(data, project, [{}], {}, 'die')
+    page = PdfReader(io.BytesIO(data)).pages[0]
+    spots = page['/Resources'].get('/ColorSpace', {})
+    if not any(list(spot.get_object()[:2]) == ['/Separation', '/CutContour'] for spot in spots.values()):
+        raise RuntimeError('刀模专色校验失败')
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{full_w:.8f}mm" height="{full_h:.8f}mm"'
+           f' viewBox="0 0 {full_w:.8f} {full_h:.8f}">'
+           f'<g id="CutContour" fill="none" stroke="#ff00ff" stroke-width="{.25 / mm:.8f}">{geometry}</g></svg>')
+    return {'die.pdf': data, 'die.svg': svg.encode('utf-8')}
+
+
+def build_production_order(raw, project, reports):
+    def read_text(source, key, limit):
+        value = source.get(key, '')
+        if not isinstance(value, str) or len(value) > limit:
+            raise ExportError(f'工艺单字段 {key} 格式无效')
+        return value.strip()
+
+    if raw is not None and not isinstance(raw, dict):
+        raise ExportError('工艺单格式无效')
+    spec = raw if raw is not None else {}
+    shape = spec.get('dieShape', 'card')
+    flash = spec.get('flashTreatment', 'unused')
+    if shape not in ('card', 'rectangle', 'ellipse') or flash not in ('unused', 'artwork', 'preview'):
+        raise ExportError('刀模或闪光交付设置无效')
+    maximum = min(project['widthMm'], project['heightMm']) / 2
+    radius = numeric(spec.get('cornerRadiusMm', min(maximum, 1.8)), '圆角半径', 0, maximum)
+    expected = {}
+    rank = {kind: index for index, kind in enumerate(('primer', 'white', 'artwork', 'spot', 'foil', 'clear', 'emboss', 'deboss', 'die'))}
+    for index, report in enumerate(reports, start=1):
+        face = report['side']
+        expected[f'{face}:artwork'] = dict(kind='artwork', face=face, name='彩稿', files=['artwork.pdf'], pdfPage=index)
+        for layer in report['processLayers']:
+            expected[f"{face}:layer:{layer['id']}"] = dict(
+                kind='layer', face=face, name=layer['name'], layerId=layer['id'], channel=layer['channel'],
+                separation=layer['spotName'], files=[layer['pdf'], layer['tiff']])
+        # Keep old requests using aggregate plates readable in the new work order.
+        if not report['processLayers']:
+            for spot_name, plate in report['plates'].items():
+                channel = plate['channel']
+                expected[f'{face}:plate:{channel}'] = dict(kind='layer', face=face, name=PLATE_LABELS[channel],
+                    channel=channel, separation=spot_name, files=[f'{channel}.pdf', f'{face}-{channel}.tif'], pdfPage=index)
+    expected['die'] = dict(kind='die', face='both', name='模切', files=['die.pdf', 'die.svg'])
+    rows = spec.get('steps')
+    if rows is None:
+        rows = [{'id': key} for key in sorted(expected, key=lambda key: rank[expected[key].get('channel', expected[key]['kind'])])]
+    if not isinstance(rows, list) or len(rows) > 250:
+        raise ExportError('工艺单最多允许 250 道工序')
+    sides = {'both', *(report['side'] for report in reports)}
+    seen = set()
+    order = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ExportError('工序格式无效')
+        key = read_text(row, 'id', 330)
+        kind, face = row.get('kind'), row.get('face')
+        if not key or key in seen:
+            raise ExportError('工序标识缺失或重复')
+        seen.add(key)
+        if key in expected:
+            entry = expected.pop(key)
+        elif isinstance(kind, str) and kind in MANUAL_OPERATIONS and isinstance(face, str) and face in sides:
+            entry = dict(kind=kind, face=face, name=read_text(row, 'name', 100) or MANUAL_OPERATIONS[kind], files=[])
+        else:
+            raise ExportError('工艺单引用了本次未导出的卡面或分版')
+        order.append(dict(entry, id=key, sequence=index, method=read_text(row, 'method', 120), note=read_text(row, 'note', 600)))
+    if expected:
+        raise ExportError('工艺单缺少应随文件导出的工序')
+    job = {
+        'schemaVersion': 1, 'project': project, 'printer': read_text(spec, 'printer', 120),
+        'stockCode': read_text(spec, 'stockCode', 120), 'note': read_text(spec, 'note', 1200),
+        'die': {'shape': shape, 'cornerRadiusMm': radius if shape == 'card' else 0, 'separation': 'CutContour'},
+        'flashTreatment': flash, 'steps': order, 'status': 'pending-printer-confirmation',
+    }
+    return job, create_die(project, shape, radius)
+
+
+def production_order_text(job):
+    lines = ['Prism 卡牌生产工艺单', f"项目  {job['project']['name']}", '状态  待印厂确认',
+             f"基材  {job['project']['material']}", f"底材反光  {job['project']['stockReflection']}"]
+    if job['stockCode']:
+        lines.append(f"印厂实际材料或料号  {job['stockCode']}")
+    if job['printer']:
+        lines.append(f"印厂  {job['printer']}")
+    flash = {'unused': '未使用', 'artwork': '印为彩色图文', 'preview': '仅屏幕预览'}
+    lines.extend([f"局部闪光  {flash[job['flashTreatment']]}", '', '工艺执行顺序'])
+    for step in job['steps']:
+        lines.append(f"{step['sequence']:02d}  {FACE_LABELS[step['face']]} · {step['name']}")
+        if step['method']:
+            lines.append(f"    做法或材料  {step['method']}")
+        if step['note']:
+            lines.append(f"    备注  {step['note']}")
+        if step['files']:
+            page = f"（第 {step['pdfPage']} 页）" if 'pdfPage' in step else ''
+            lines.append(f"    文件  {' / '.join(step['files'])}{page}")
+    if job['note']:
+        lines.extend(['', '整卡交付备注', job['note']])
+    return '\n'.join(lines).encode('utf-8')
+
+
 def json_bytes(value):
     return json.dumps(value, ensure_ascii=False, indent=2).encode('utf-8')
 
@@ -322,17 +461,22 @@ def export_package(payload):
             })
         page_reports.append({
             'side': page['side'], 'pixels': list(size), 'dpi': [round(value, 2) for value in dpi],
-            'plates': {names[key]: {'coveragePercent': round(float(mask.mean()) * 100, 3),
+            'plates': {names[key]: {'channel': key, 'coveragePercent': round(float(mask.mean()) * 100, 3),
                                     'inkPixels': int(mask.sum())}
                        for key, mask in page['masks'].items()},
             'thresholdedMasks': page['thresholded'], 'processLayers': layer_reports,
         })
+    order, die_files = build_production_order(payload.get('production'), project, page_reports)
+    files.update(die_files)
+    files['production-order.json'] = json_bytes(order)
+    files['production-order.txt'] = production_order_text(order)
     notices = [
         '本文件包为技术打样参考，尚未经过实际印厂 RIP 与实体打样验收。',
         '彩稿已栅格化为 DeviceCMYK 图像。通用 RGB 转 CMYK 未使用印厂 ICC，色彩需要印厂确认。',
         'PDF 为普通 PDF 1.6，未声明 PDF/X 合规，也未嵌入虚构的输出条件。',
         '工艺蒙版使用 128 阈值转为二值，PDF 与 TIFF 共用相同的二值数据。',
         '合版 PDF 的专色按通道合并，供读版核对。layers/ 保留各工艺层，请按印厂确认的工序交付。',
+        '专色分版为实地二值蒙版，实际色号请查工艺单。压凸与压凹分版仅描述平面区域，模具结构及深度由印厂确认。',
     ]
     if any(min(page['dpi']) < 299 for page in page_reports):
         notices.append('部分卡面的有效分辨率低于 300 PPI，建议提升输出尺寸后重新导出。')
@@ -341,7 +485,8 @@ def export_package(payload):
         'createdAt': datetime.now(timezone.utc).isoformat(), 'project': project,
         'profile': profile, 'spotNames': {key: names[key] for key in keys},
         'verificationStatus': 'software-structure-checked', 'productionApproved': False,
-        'checks': ['尺寸与正反面对齐', 'PDF 页数与 TrimBox', '专色名称与叠印属性', 'TIFF 二值数据往返一致'],
+        'checks': ['尺寸与正反面对齐', 'PDF 页数与 TrimBox', '专色名称与叠印属性', 'TIFF 二值数据往返一致',
+                   '独立刀模 CutContour 与成品框', '工艺单与实际分版对应'],
         'pages': page_reports, 'notices': notices,
     }
     files['preflight-report.json'] = json_bytes(report)
@@ -352,7 +497,8 @@ def export_package(payload):
         f"底材反光  {project['stockReflection']}",
         '页序  ' + '、'.join('正面' if page['side'] == 'front' else '背面' for page in pages), '',
         'artwork.pdf 为 CMYK 彩稿。composite.pdf 为彩稿与命名专色合版。',
-        'white.pdf、foil.pdf、clear.pdf 按实际使用工艺生成。独立版是纯 K 版。',
+        '各工艺按实际使用情况输出独立纯 K 版。模切使用 die.pdf 或 die.svg。',
+        'production-order.txt 记录每道工序的顺序、加工面、做法及配套文件。',
         '各面 TIFF 中黑色表示施作区域，白色表示空白。各版与彩稿使用同一物理坐标。',
         '未使用某道工艺的卡面在相应多页独立 PDF 中保留空白页，以维持页序。', '',
         '通道映射', *[f"{PLATE_LABELS[key]}  {names[key]}" for key in keys], '',
@@ -418,7 +564,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(403, json_bytes({'error': '仅接受本机编辑器请求'}))
         elif path == '/api/health':
             self.respond(200, json_bytes({'status': 'ok', 'engine': PRINT_ENGINE,
-                                         'profiles': SPOT_PROFILES, 'layeredPlates': True, 'productionApproved': False}))
+                                         'profiles': SPOT_PROFILES, 'layeredPlates': True,
+                                         'productionOrder': True, 'productionApproved': False}))
         elif path == '/api/projects' or path.startswith('/api/projects/'):
             self.handle_projects(path)
         elif path == '/api' or path.startswith('/api/'):

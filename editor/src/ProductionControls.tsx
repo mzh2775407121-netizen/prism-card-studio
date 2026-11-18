@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronRight, Eye, EyeOff, ImagePlus, Layers3, Plus, Square, Type } from 'lucide-react';
-import { PROCESS_LABELS, STOCK_REFLECTIONS, getStockReflection, getFlashStyle, FLASH_STYLES, processKind, uid, type CardNode, type CardSide, type Effect, type ProcessKind, type Project, type Region, type StockReflection } from './model';
+import { ImagePlus, Square, Type } from 'lucide-react';
+import { STOCK_REFLECTIONS, uid, type CardNode, type CardSide, type Effect, type Project, type Region, type StockReflection } from './model';
+import { LAYER_KINDS, type LayerKind } from './layers';
+import InspectorMenu from './InspectorMenu';
 import { readImage } from './io';
 import { makeCanvas, renderEffectMask } from './render';
 import './production-controls.css';
@@ -21,85 +23,53 @@ export function StockPicker({material,reflection,onMaterial,onReflection}:{
 }) {
   const choices: StockReflection[] = ['matte','black'].includes(material) ? ['none'] : ['none','mirror','rainbow','radial'];
   return <div className="stock-picker">
-    <label className="field">卡基材料<select value={material} onChange={event=>onMaterial(event.target.value)}>
-      {STOCKS.map(stock=><option key={stock.id} value={stock.id}>{stock.name} · {stock.note}</option>)}
-    </select></label>
-    <label className="field">底材反光<select value={reflection} onChange={event=>onReflection(event.target.value as StockReflection)}>
-      {choices.map(choice=><option value={choice} key={choice}>{STOCK_REFLECTIONS[choice]}</option>)}
-    </select></label>
+    <label className="field">卡基材料
+      <span className="stock-select"><select value={material} onChange={event=>onMaterial(event.target.value)}>
+        {STOCKS.map(stock=><option key={stock.id} value={stock.id}>{stock.name} · {stock.note}</option>)}
+      </select></span>
+    </label>
+    <label className="field">底材反光
+      <span className="stock-select"><select value={reflection} onChange={event=>onReflection(event.target.value as StockReflection)}>
+        {choices.map(choice=><option value={choice} key={choice}>{STOCK_REFLECTIONS[choice]}</option>)}
+      </select></span>
+    </label>
   </div>;
 }
 
-const layerOptions = [
-  ['artwork','彩稿','图片、文字与形状，进入 CMYK 彩稿。'],
-  ['reflection','局部闪光','独立的纹样层，可指定区域与方向。'],
-  ['white','白墨','单独的白墨版，覆盖指定区域。'],
-  ['foil','箔版','单独的箔版，指定箔材与覆盖区域。'],
-  ['varnish','光油','单独的光油版，指定上光区域。'],
+export function LayerTypeField({ kind, disabled, onChange }: {
+  kind: LayerKind; disabled?: boolean; onChange: (kind: LayerKind) => void;
+}) {
+  return <div className="field">
+    图层属性
+    <InspectorMenu ariaLabel="图层属性" value={kind} disabled={disabled}
+      options={[{ value: 'artwork', label: '彩稿' }, ...LAYER_KINDS.filter(([value]) => value !== 'artwork')
+        .map(([value, label]) => ({ value, label }))]}
+      onChange={value => onChange(value as LayerKind)}/>
+  </div>;
+}
+
+const maskShapes = [
+  ['paint','画笔'], ['rect','矩形'], ['ellipse','椭圆'], ['polygon','多边形'],
 ] as const;
-export type LayerDraft = {
-  kind: 'artwork' | ProcessKind;
-  area: string;
-  content: 'text' | 'rect' | 'ellipse' | 'image';
-  contentMask: boolean;
-  name: string;
-};
-
-export function CreateLayer({side, source, initial, onCreate, onClose}:{
-  side:CardSide;source?:CardNode;initial:LayerDraft['kind'];onCreate:(draft:LayerDraft)=>void;onClose:()=>void;
-}){
-  const [kind,setKind]=useState(initial);
-  const [area,setArea]=useState(source&&initial!=='artwork'?':contour':'');
-  const [content,setContent]=useState<LayerDraft['content']>('text');
-  const [contentMask,setContentMask]=useState(false);
-  const [name,setName]=useState('');
-  return <>
-    <div className="new-content">
-      <fieldset className="process-options"><legend>图层属性</legend>
-        {layerOptions.map(([value,label,description])=><label key={value}><input type="radio" name="layer-kind" checked={kind===value} onChange={()=>{setKind(value);if(value==='artwork'&&area===':contour')setArea('')}}/><span><b>{label}</b><small>{description}</small></span></label>)}
-      </fieldset>
-      <label className="field">图层名称<input value={name} maxLength={100} onChange={event=>setName(event.target.value)} placeholder={layerOptions.find(option=>option[0]===kind)?.[1]}/></label>
-      <label className="field">作用区域<select value={area} onChange={event=>setArea(event.target.value)}>
-        <option value="">{kind==='artwork'?'整面自由排版':'整张卡面'}</option>
-        {source&&kind!=='artwork'&&<option value=":contour">{source.name} · 图层轮廓</option>}
-        {side.regions.filter(region=>region.kind!=='full').map(region=><option value={region.id} key={region.id}>{region.name}</option>)}
-        <optgroup label="新绘制蒙版">{[['paint','画笔'],['rect','矩形'],['ellipse','椭圆'],['polygon','多边形']].map(([value,label])=>
-          <option value={':'+value} key={value}>绘制{label}蒙版</option>)}</optgroup>
-      </select></label>
-      {kind==='artwork'?<label className="field">彩稿内容<select value={content} onChange={event=>setContent(event.target.value as LayerDraft['content'])}>
-        <option value="text">文字</option><option value="image">上传图片</option><option value="rect">矩形</option><option value="ellipse">椭圆</option>
-      </select></label>:<label className="check-field"><input type="checkbox" checked={contentMask} onChange={event=>setContentMask(event.target.checked)}/>在区域内用文字、图形或图片细化蒙版</label>}
-    </div>
-    <div className="modal-footer"><button className="button" onClick={onClose}>取消</button><button className="button primary" onClick={()=>onCreate({kind,name:name.trim(),area,content,contentMask})}>
-      {area.startsWith(':')&&area!==':contour'?'开始绘制':kind==='artwork'&&content==='image'?'选择图片':'创建图层'}
-    </button></div>
-  </>;
-}
-
-export function ProductionStack({project,side,selected,onSelect,onToggle,onAdd,onArtwork,onStock}:{
-  project:Project;side:CardSide;selected:string|null;onSelect:(effect:Effect)=>void;onToggle:(effect:Effect)=>void;
-  onAdd:()=>void;onArtwork:()=>void;onStock:()=>void;
-}){
-  const effectGroup = (kind:ProcessKind) => {
-    const effects = [...side.effects].reverse().filter(effect=>processKind(effect)===kind);
-    return effects.length ? <section className="process-group" key={kind} aria-label={PROCESS_LABELS[kind]}>
-      <h3>{PROCESS_LABELS[kind]} <small>{effects.length}</small></h3>
-      {effects.map(effect=><div className={effect.id===selected?'process-row selected':'process-row'} key={effect.id}>
-        <button onClick={()=>onSelect(effect)}><span className={'process-dot '+kind}/><span>{effect.name}<small>{kind==='reflection'?`${FLASH_STYLES[getFlashStyle(project,effect)].label} · `:''}{effect.maskContent!==undefined?`内容蒙版 · ${effect.maskContent.length} 项`:side.regions.find(region=>region.id===effect.regionId)?.name||'区域缺失'}</small></span></button>
-        <button className="process-toggle" aria-label={effect.name+(effect.visible?'隐藏':'显示')} onClick={()=>onToggle(effect)}>{effect.visible?<Eye size={15}/>:<EyeOff size={15}/>}</button>
-      </div>)}
-    </section>:null;
-  };
-  return <div className="production-stack">
-    <button className="button wide-button" onClick={onAdd}><Plus size={16}/>新建图层</button>
-    {effectGroup('varnish')}{effectGroup('foil')}{effectGroup('reflection')}
-    <button className="stack-link" onClick={onArtwork}><Layers3 size={16}/><span>彩稿<small>{side.nodes.length} 个图文层</small></span><ChevronRight size={14}/></button>
-    {effectGroup('white')}
-    <button className="stack-link" onClick={onStock}><span className="process-dot reflection"/><span>底材反光<small>{STOCK_REFLECTIONS[getStockReflection(project)]}</small></span><ChevronRight size={14}/></button>
-    <button className="stack-link" onClick={onStock}><Layers3 size={16}/><span>卡基<small>{STOCKS.find(stock=>stock.id===project.material)?.name??project.material}</small></span><ChevronRight size={14}/></button>
+export type MaskShape = typeof maskShapes[number][0];
+export function LayerMaskField({ name, regions, value, artwork, noMask, disabled, sources, onChange, compact }: {
+  name: string; regions: Region[]; value?: string; artwork?: boolean; noMask?: boolean; disabled?: boolean; compact?: boolean;
+  sources?: CardNode[]; onChange: (value: string) => void;
+}) {
+  const options = [
+    ...(artwork ? [{ value: '', label: '无蒙版' }] : []),
+    ...regions.map(region => ({ value: region.id, label: region.name })),
+    ...(sources || []).map(node => ({ value: 'node:' + node.id, label: node.name + ' · 轮廓', group: '图层轮廓' })),
+    ...maskShapes.map(([shape, label]) => ({ value: 'draw:' + shape, label: '绘制' + label + '蒙版' })),
+    ...(regions.filter(region => region.kind !== 'full').length >= 2 ? [{ value: 'union:', label: '组合已有蒙版…' }] : []),
+  ];
+  return <div className="field">
+    {!compact && name}
+    <InspectorMenu ariaLabel={name} menuTitle={name} menuWidth={230}
+      value={noMask ? '' : value ?? ''} placeholder="选择或绘制蒙版" options={options}
+      disabled={disabled} onChange={onChange}/>
   </div>;
 }
-
 const shapeFor=(project:Project,side:CardSide,effect:Effect,type:CardNode['type']):CardNode=>{
   const region=side.regions.find(item=>item.id===effect.regionId);
   const area=region?.bounds || {x:0,y:0,width:project.widthMm*10,height:project.heightMm*10};
@@ -137,7 +107,7 @@ export function MaskContentEditor({project,side,effect,onApply,onClose}:{
       target.width=mask.width;target.height=mask.height;
       const ink=makeCanvas(mask.width,mask.height),context=ink.getContext('2d')!;
       context.drawImage(mask,0,0);context.globalCompositeOperation='source-in';
-      context.fillStyle='#24362e';context.fillRect(0,0,ink.width,ink.height);
+      context.fillStyle='#303030';context.fillRect(0,0,ink.width,ink.height);
       target.getContext('2d')?.drawImage(ink,0,0);
     }).catch(()=>{if(active)setError('无法预览蒙版，请检查上传的图片。')});
     return ()=>{active=false};

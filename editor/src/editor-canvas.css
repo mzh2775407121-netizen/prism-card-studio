@@ -1,0 +1,78 @@
+.canvas-face-label {
+  position: absolute;
+  transform: translateY(calc(-100% - 4px));
+  min-width: 34px;
+  padding: 3px 5px;
+  color: #b7b7b7;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: left;
+  white-space: nowrap;
+}
+.canvas-face-label:hover:not(:disabled) { color: #f1f1f1; background: #3b3b3b; }
+.canvas-face-label[aria-pressed=true] { color: var(--prism-focus, #69b5f6); background: #383838; box-shadow: inset 0 -1px 0 var(--prism-blue, #237ac2); font-weight: 600; }
+.editor-canvas [data-card-artboard][data-drop-target] { box-shadow: 0 0 0 2px var(--prism-focus, #69b5f6); }
+.canvas-face-label[data-drop-target] { color: var(--prism-focus, #69b5f6); background: #333333; box-shadow: inset 0 0 0 1px var(--prism-focus, #69b5f6); font-weight: 600; }
+.canvas-tool-hint {
+  position: absolute;
+  left: 18px;
+  bottom: 62px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 36px);
+  padding: 7px 10px;
+  border: 1px solid #4a4a4a;
+  border-radius: 5px;
+  background: #303030;
+  color: #c7c7c7;
+  font-size: 11px;
+  line-height: 16px;
+  pointer-events: none;
+}
+.canvas-tool-hint strong { color: #f1f1f1; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.canvas-tool-hint span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-text-editor {
+  position: absolute;
+  z-index: 3;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.canvas-text-editor-reflection { position: relative; transform-origin: 0 0; overflow: hidden; }
+.canvas-text-editor textarea {
+  all: unset;
+  display: block;
+  position: absolute;
+  left: 0;
+  box-sizing: border-box;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  resize: none;
+  overflow: hidden;
+  padding: 0;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--prism-focus, #69b5f6);
+  white-space: break-spaces;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  pointer-events: auto;
+  touch-action: auto;
+  user-select: text;
+  cursor: text;
+  appearance: none;
+  box-shadow: none;
+  transition: none;
+}
+.canvas-text-editor textarea::selection {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: rgba(35, 122, 194, .32);
+}
+.canvas-text-editor textarea:focus { outline: 0; box-shadow: none; background: transparent; border: 0; }
+@media (max-width: 760px) {
+  .canvas-tool-hint { left: 10px; max-width: calc(100% - 20px); gap: 7px; }
+}

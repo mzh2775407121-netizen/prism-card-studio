@@ -1,15 +1,47 @@
-import { useEffect, useImperativeHandle, useMemo, useRef, useState, type PointerEvent, type Ref } from 'react';
-import { Stage, Layer, Group, Rect, Ellipse, Image as KonvaImage, Line, Transformer } from 'react-konva';
+import { Fragment, useEffect, useImperativeHandle, useMemo, useRef, useState, type PointerEvent, type Ref } from 'react';
+import { Stage, Layer, Group, Rect, Circle, Ellipse, Shape, Image as KonvaImage, Line, Transformer } from 'react-konva';
 import Konva from 'konva';
 import { PrintGuideLines, printGuideBounds } from './PrintGuides';
-import { pentagon, type CardNode, type CardSide, type Project, type Region, type SideName, type Stroke } from './model';
-import { imageCrop, loadImage, makeCanvas, drawCardText, drawShape, renderCard, renderEffectMask, renderEffects, renderRegionMask } from './render';
+import { processKind, type CardNode, type CardSide, type GradientPoint, type LayerGradient, type PathPoint, type Project, type Region, type SideName, type Stroke } from './model';
+import { artworkPath, loadImage, makeCanvas, drawArtwork, renderCard, renderEffectMask, renderEffects, renderRegionMask } from './render';
+import { activeImageFill, fillType, gradientAngle, gradientPoints, hasFill, hasStroke } from './layerAppearance';
+import { isOpenVector, MAX_PATH_POINTS, traceVectorPath } from './vectorPaths';
+import { findLayerGroup, layerGroupMembers } from './layerGroups';
+import { moveArtworkGroup } from './transferLayer';
+import CanvasTextEditor, { expandedTextDraft } from './CanvasTextEditor';
+import './editor-canvas.css';
 
 type Point = { x: number; y: number };
 type Camera = Point & { scale: number; fitScale: number };
 const MIN_ZOOM = .1;
 const MAX_ZOOM = 32;
+const FACES = ['front', 'back'] as const;
+const EDITOR_BLUE = '#237ac2';
+const EDITOR_FOCUS = '#69b5f6';
 export const ZOOM_STEP = 1.2;
+export type EditorTool = 'select' | 'hand' | 'brush' | 'eraser' | 'geometry' | 'line' | 'pen';
+export type CreatedVector = Pick<CardNode, 'x' | 'y' | 'width' | 'height' | 'pathPoints' | 'pathClosed'> & { type: 'line' | 'path' };
+type VectorDraft = { face: SideName; points: PathPoint[] };
+type LineGesture = { face: SideName; start: Point; end: Point };
+
+function vectorFromPoints(points: PathPoint[], type: 'line' | 'path', closed: boolean): CreatedVector {
+  const positions = points.flatMap(point => [point, ...(point.in ? [point.in] : []), ...(point.out ? [point.out] : [])]);
+  const x = Math.min(...positions.map(point => point.x));
+  const y = Math.min(...positions.map(point => point.y));
+  const width = Math.max(1, Math.max(...positions.map(point => point.x)) - x);
+  const height = Math.max(1, Math.max(...positions.map(point => point.y)) - y);
+  const normalize = (point: Point) => ({ x: (point.x - x) / width, y: (point.y - y) / height });
+  return { type, x, y, width, height, pathClosed: closed,
+    pathPoints: points.map(point => ({ ...normalize(point),
+      ...(point.in ? { in: normalize(point.in) } : {}), ...(point.out ? { out: normalize(point.out) } : {}) })) };
+}
+
+function snapAngle(start: Point, end: Point, enabled: boolean): Point {
+  if (!enabled) return end;
+  const angle = Math.round(Math.atan2(end.y - start.y, end.x - start.x) / (Math.PI / 4)) * Math.PI / 4;
+  const distance = Math.hypot(end.x - start.x, end.y - start.y);
+  return { x: start.x + Math.cos(angle) * distance, y: start.y + Math.sin(angle) * distance };
+}
 
 export interface CanvasNavigation {
   fit: () => void;
@@ -20,179 +52,309 @@ export interface EditorCanvasProps {
   project: Project;
   side: SideName;
   selectedId: string | null;
-  onSelect: (id: string | null) => void;
-  onChange: (side: CardSide) => void;
-  tool: 'select' | 'hand' | 'brush' | 'eraser' | 'geometry';
+  selectedIds?: string[];
+  artworkGroupId?: string;
+  onSelect: (id: string | null, additive?: boolean) => void;
+  onCanvasMenu: (face: SideName, point: Point, screen: Point, nodeId?: string) => void;
+  onSelectFace: (face: SideName, nodeId?: string) => void;
+  onTransferArtwork: (from: SideName, to: SideName, id: string, position: Point, groupId?: string) => boolean;
+  sidebarDropFace?: SideName;
+  faceLocked?: boolean;
+  onChange: (side: CardSide, face: SideName) => void;
+  tool: EditorTool;
+  onCreateVector: (face: SideName, vector: CreatedVector) => void;
   spaceHeld: boolean;
   navigationRef: Ref<CanvasNavigation>;
   showGuides: boolean;
-  hasModeNotice?: boolean;
   regionId: string | null;
   regionMode: boolean;
   highlightRegion?: boolean;
   onRegionChange: (region: Region) => void;
-  onTextEdit?: (id: string) => void;
+  textEdit?: { face: SideName; id: string };
+  onTextEdit?: (face: SideName, id: string) => void;
+  onTextCommit?: (face: SideName, id: string, text: string) => void;
+  onTextCancel?: () => void;
   plate?: string | null;
+  flashOnly?: boolean;
   brushSize?: number;
-  onZoom?: (zoom: number) => void;
-  referenceOpacity?: number;
   layerPlate?: string;
   effectPreviewId?: string;
+  editGradient?: boolean;
+  onGradientChange?: (gradient: LayerGradient) => void;
+  onGradientStart?: () => void;
   cardBoundsRef: Ref<HTMLDivElement>;
 }
 
-function ArtworkNode({ node, interactive, onSelect, onCommit, onDrag, onTransformPreview, onTextEdit }: {
-  node: CardNode; interactive: boolean; onSelect: () => void;
+function artworkId(face: SideName, nodeId: string) {
+  return `${face}-artwork-${nodeId}`;
+}
+
+function ArtworkNode({ node, face, interactive, canDrag = true, onSelect, onCommit, onDrag, onDrop, onTransformPreview, onTextEdit }: {
+  node: CardNode; face: SideName; interactive: boolean; onSelect: (additive: boolean) => void;
+  canDrag?: boolean;
   onCommit: (node: CardNode) => void; onDrag: (node: CardNode) => void;
+  onDrop: (node: CardNode, cancelled: boolean) => void;
   onTransformPreview: (node: CardNode) => void;
   onTextEdit?: () => void;
 }) {
-  const shape = useMemo(() => {
-    if (!node.gradient && !node.polygon) return undefined;
-    if (!['rect','ellipse','polygon'].includes(node.type)) return undefined;
-    const scale = Math.min(2, 2600 / Math.max(node.width,node.height));
-    const layer = makeCanvas(node.width*scale,node.height*scale);
-    const context = layer.getContext('2d')!;
-    context.scale(scale,scale);
-    drawShape(context,node);
-    return layer;
-  },[node]);
-  const [image, setImage] = useState<HTMLImageElement>();
-  const [fontsReady, setFontsReady] = useState(false);
-  useEffect(() => {
-    let live = true;
-    if (node.type === 'text') document.fonts.load('14px "Work Sans"').then(() => {
-      if (live) setFontsReady(true);
-    }).catch(() => {});
-    return () => { live = false; };
-  }, [node.type]);
-  const textImage = useMemo(() => {
-    if (node.type !== 'text') return undefined;
-    const scale = Math.min(2, 2600 / Math.max(node.width, node.height));
-    const image = makeCanvas(node.width * scale, node.height * scale);
-    const context = image.getContext('2d')!;
-    context.scale(scale, scale);
-    context.fillStyle = node.fill;
-    drawCardText(context, node);
-    return image;
-  }, [node.type, node.width, node.height, node.text, node.fill, node.fontSize, node.fontStyle, node.fontFamily, node.align, node.lineHeight, node.stroke, node.strokeWidth, node.letterSpacing, fontsReady]);
+  const minimumSize = node.type === 'line' || node.type === 'path' ? 1 : 8;
+  const [loaded, setLoaded] = useState<{ src: string; image: HTMLImageElement }>();
+  const src = activeImageFill(node)?.src;
+  const image = loaded?.src === src ? loaded?.image : undefined;
+  const [, setFontsReady] = useState(false);
   useEffect(() => {
     let current = true;
-    if (node.type === 'image' && node.src) loadImage(node.src).then(value => {
-      if (current) setImage(value);
-    }).catch(() => { if (current) setImage(undefined); });
+    if (node.type === 'text') document.fonts.ready.then(() => { if (current) setFontsReady(true); });
     return () => { current = false; };
-  }, [node.src, node.type]);
+  }, [node.type]);
+  useEffect(() => {
+    let current = true;
+    if (src) loadImage(src).then(value => {
+      if (current) setLoaded({ src, image: value });
+    }).catch(() => { if (current) setLoaded(undefined); });
+    return () => { current = false; };
+  }, [src]);
   const common = {
-    id: node.id, name: 'artwork-node', x: node.x, y: node.y,
+    id: artworkId(face, node.id), name: 'artwork-node', x: node.x, y: node.y,
     width: node.width, height: node.height, rotation: node.rotation,
     opacity: node.opacity, visible: node.visible,
-    draggable: interactive && !node.locked, listening: interactive && !node.locked,
-    fill: node.fill, stroke: node.stroke, strokeWidth: node.strokeWidth || 0,
+    draggable: interactive && !node.locked && canDrag, listening: interactive && !node.locked,
+    stroke: hasStroke(node) ? node.stroke : undefined,
+    strokeWidth: (node.strokeWidth || 0) * (isOpenVector(node) ? 1 : node.strokeAlign === 'outside' ? 2 : node.strokeAlign === 'inside' ? 0 : 1),
     globalCompositeOperation: (node.blend || 'source-over') as GlobalCompositeOperation,
     onMouseDown: (event: Konva.KonvaEventObject<MouseEvent>) => {
       if (event.evt.button !== 0) return;
-      event.cancelBubble = true; onSelect();
+      event.cancelBubble = true; onSelect(event.evt.shiftKey);
     },
-    onTouchStart: (event: Konva.KonvaEventObject<TouchEvent>) => { event.cancelBubble = true; onSelect(); },
+    onTouchStart: (event: Konva.KonvaEventObject<TouchEvent>) => { event.cancelBubble = true; onSelect(false); },
     onDblClick: () => onTextEdit?.(),
     onDblTap: () => onTextEdit?.(),
     onDragMove: (event: Konva.KonvaEventObject<DragEvent>) => onDrag({ ...node, x: event.target.x(), y: event.target.y() }),
-    onDragEnd: (event: Konva.KonvaEventObject<DragEvent>) => onCommit({ ...node, x: event.target.x(), y: event.target.y() }),
+    onDragEnd: (event: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
+      const cancelled = !event.evt || event.evt.type === 'touchcancel';
+      if (cancelled) event.target.position({ x: node.x, y: node.y });
+      onDrop({ ...node, x: event.target.x(), y: event.target.y() }, cancelled);
+    },
     onTransform: (event: Konva.KonvaEventObject<Event>) => {
       const target = event.target;
       onTransformPreview({ ...node, x: target.x(), y: target.y(), rotation: target.rotation(),
-        width: Math.max(8, target.width() * target.scaleX()),
-        height: Math.max(8, target.height() * target.scaleY()),
+        width: Math.max(minimumSize, target.width() * target.scaleX()),
+        height: Math.max(minimumSize, target.height() * target.scaleY()),
         ...(node.type === 'text' ? { fontSize: (node.fontSize || 24) * target.scaleY() } : {}) });
     },
     onTransformEnd: (event: Konva.KonvaEventObject<Event>) => {
       const target = event.target;
       const next = { ...node, x: target.x(), y: target.y(), rotation: target.rotation(),
-        width: Math.max(8, target.width() * target.scaleX()),
-        height: Math.max(8, target.height() * target.scaleY()) };
+        width: Math.max(minimumSize, target.width() * target.scaleX()),
+        height: Math.max(minimumSize, target.height() * target.scaleY()) };
       if (node.type === 'text') next.fontSize = (node.fontSize || 24) * target.scaleY();
       target.scaleX(1); target.scaleY(1);
       onCommit(next);
     },
   };
-  if (shape) return <KonvaImage {...common} fill={undefined} stroke={undefined} image={shape}/>;
-  if (node.type === 'text') return <KonvaImage {...common} fill={undefined} stroke={undefined} image={textImage} />;
-  if (node.type === 'ellipse') return <Group {...common}>
-    <Ellipse x={node.width / 2} y={node.height / 2} radiusX={node.width / 2} radiusY={node.height / 2}
-      fill={node.fill} stroke={node.stroke} strokeWidth={node.strokeWidth || 0} />
-  </Group>;
-  if (node.type === 'polygon') return <Group {...common}>
-    <Line points={pentagon(node.width,node.height)} closed fill={node.fill} stroke={node.stroke} strokeWidth={node.strokeWidth || 0}/>
-  </Group>;
-  if (node.type === 'image' && image) return <KonvaImage {...common} fill={undefined} image={image}
-    crop={imageCrop(image, node)} cornerRadius={node.cornerRadius || 0} />;
-  return <Rect {...common} cornerRadius={node.cornerRadius || 0} />;
+  if (node.type === 'empty') return null;
+  return <Shape {...common} perfectDrawEnabled={false} lineJoin="round"
+    sceneFunc={context => drawArtwork(context._context, node, image)}
+    hitFunc={(context, shape) => {
+      const raw = context._context;
+      const path = artworkPath(node);
+      raw.save();
+      if (node.flipX || node.flipY) {
+        raw.translate(node.width / 2, node.height / 2);
+        raw.scale(node.flipX ? -1 : 1, node.flipY ? -1 : 1);
+        raw.translate(-node.width / 2, -node.height / 2);
+      }
+      raw.fillStyle = shape.colorKey;
+      if (!isOpenVector(node)) raw.fill(path);
+      if (common.stroke && common.strokeWidth) {
+        raw.strokeStyle = shape.colorKey;
+        raw.lineWidth = Math.max(common.strokeWidth, isOpenVector(node) ? 8 / Math.max(.01, shape.getAbsoluteScale().x) : 0);
+        raw.lineCap = 'round';
+        raw.stroke(path);
+      }
+      raw.restore();
+    }}/>;
 }
 
-export default function EditorCanvas({ project, side: sideName, selectedId, onSelect, onChange,
-  tool, spaceHeld, navigationRef, showGuides, hasModeNotice, regionId, regionMode, highlightRegion, onRegionChange, onTextEdit, plate,
-  brushSize = 30, onZoom, referenceOpacity = 0, layerPlate, effectPreviewId, cardBoundsRef }: EditorCanvasProps) {
+function GradientHandles({ node, scale, onStart, onChange }: {
+  node: CardNode & { gradient: LayerGradient };
+  scale: number; onStart?: () => void; onChange: (gradient: LayerGradient) => void;
+}) {
+  const reflectPoint = ([x, y]: GradientPoint): GradientPoint => [node.flipX ? node.width - x : x, node.flipY ? node.height - y : y];
+  const points = gradientPoints(node.gradient, node.width, node.height).map(reflectPoint) as [GradientPoint, GradientPoint];
+  return <Group x={node.x} y={node.y} rotation={node.rotation} name="gradient-handles">
+    <Line points={points.flat()} stroke="#f7f7f7" strokeWidth={3 / scale} opacity={.9} listening={false}/>
+    <Line points={points.flat()} stroke={EDITOR_BLUE} strokeWidth={1.5 / scale} listening={false}/>
+    {points.map(([x, y], index) => <Circle key={index} name={'gradient-handle-' + index}
+      x={x} y={y} radius={6 / scale} hitStrokeWidth={12 / scale}
+      fill={index ? '#ffffff' : EDITOR_FOCUS} stroke={EDITOR_BLUE} strokeWidth={1.6 / scale} draggable
+      onMouseDown={event => { event.cancelBubble = true; }}
+      onTouchStart={event => { event.cancelBubble = true; }}
+      onDragStart={onStart}
+      onDragMove={event => {
+        const clamp = (value: number) => Math.max(-2, Math.min(3, value));
+        const x = clamp(event.target.x() / node.width) * node.width;
+        const y = clamp(event.target.y() / node.height) * node.height;
+        const moved = [...points] as [GradientPoint, GradientPoint];
+        moved[index] = [x, y];
+        event.target.position({ x, y });
+        const canonical = moved.map(reflectPoint) as [GradientPoint, GradientPoint];
+        const [start, end] = canonical;
+        if (Math.hypot(end[0] - start[0], end[1] - start[1]) < .25) return;
+        onChange({ ...node.gradient, angle: gradientAngle(canonical),
+          endpoints: [[start[0] / node.width, start[1] / node.height], [end[0] / node.width, end[1] / node.height]] });
+      }}/>)}
+  </Group>;
+}
+
+function useFaceArtwork(project: Project, face: SideName, side: CardSide, flashOnly = false) {
+  const [clipped, setClipped] = useState<HTMLCanvasElement>();
+  const [effects, setEffects] = useState<HTMLCanvasElement>();
+  const hasClips = side.nodes.some(node => node.type !== 'empty' && node.clipRegionId && node.visible);
+  useEffect(() => {
+    if (!hasClips) { setClipped(undefined); return; }
+    let current = true;
+    renderCard({ ...project, [face]: side }, face, { effects: false, transparentGround: true })
+      .then(canvas => { if (current) setClipped(canvas); })
+      .catch(() => { if (current) setClipped(undefined); });
+    return () => { current = false; };
+  }, [hasClips, side, face, project.widthMm, project.heightMm]);
+  useEffect(() => {
+    let current = true;
+    const effectSide = flashOnly ? { ...side, effects: side.effects.filter(effect => processKind(effect) === 'reflection') } : side;
+    renderEffects(project, effectSide, 1, 0, !flashOnly)
+      .then(canvas => { if (current) setEffects(canvas); })
+      .catch(() => { if (current) setEffects(undefined); });
+    return () => { current = false; };
+  }, [project.widthMm, project.heightMm, project.material, project.stockReflection, project.previewStyle, side, flashOnly]);
+  return { clipped: hasClips ? clipped : undefined, effects };
+}
+
+function previewDrag(project: Project, face: SideName, dragged?: CardNode, selectedIds: readonly string[] = [], groupId?: string) {
+  const side = project[face];
+  if (!dragged) return side;
+  const original = side.nodes.find(node => node.id === dragged.id);
+  const translating = original && original.width === dragged.width &&
+    original.height === dragged.height && original.rotation === dragged.rotation;
+  if (translating && groupId && layerGroupMembers(side, groupId).artworkIds.includes(dragged.id)) {
+    return moveArtworkGroup(project, face, groupId, { x: dragged.x - original.x, y: dragged.y - original.y }) ?? side;
+  }
+  const translateGroup = translating && original.groupId && !findLayerGroup(side, original.groupId);
+  return { ...side, nodes: side.nodes.map(node => {
+    if (node.id === dragged.id) return dragged;
+    return ((translateGroup && node.groupId === original?.groupId) || (original && selectedIds.includes(original.id) && selectedIds.includes(node.id) && node.visible)) && !node.locked
+      ? { ...node, x: node.x + dragged.x - original.x, y: node.y + dragged.y - original.y } : node;
+  }) };
+}
+
+export default function EditorCanvas({ project, side: sideName, selectedId, selectedIds, artworkGroupId, onSelect, onCanvasMenu, onSelectFace, onTransferArtwork, sidebarDropFace, faceLocked, onChange,
+  tool, onCreateVector, spaceHeld, navigationRef, showGuides, regionId, regionMode, highlightRegion, onRegionChange, textEdit, onTextEdit, onTextCommit, onTextCancel, plate, flashOnly,
+  brushSize = 30, layerPlate, effectPreviewId, editGradient, onGradientChange, onGradientStart, cardBoundsRef }: EditorCanvasProps) {
   const holder = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const transformerRef = useRef<Konva.Transformer>(null);
   const [size, setSize] = useState({ width: 600, height: 700 });
   const [manualCamera, setManualCamera] = useState<Camera | null>(null);
   const [panning, setPanning] = useState(false);
-  const [draggedNode, setDraggedNode] = useState<CardNode | null>(null);
+  const [dragged, setDragged] = useState<{ face: SideName; node: CardNode; destination?: SideName } | null>(null);
   const [snap, setSnap] = useState({ x: false, y: false });
-  const [effectImage, setEffectImage] = useState<HTMLCanvasElement>();
   const [regionImage, setRegionImage] = useState<HTMLCanvasElement>();
-  const [clippedArt, setClippedArt] = useState<HTMLCanvasElement>();
-  const [plateImage, setPlateImage] = useState<HTMLCanvasElement>();
-  const [reference, setReference] = useState<{ src: string; image: HTMLImageElement }>();
+  const [platePreview, setPlatePreview] = useState<{ face: SideName; channel: string; layer?: string; image: HTMLCanvasElement }>();
   const [draftStroke, setDraftStroke] = useState<Stroke | null>(null);
   const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
   const panStart = useRef<{ id: number; pointer: Point; camera: Camera } | null>(null);
   const currentStroke = useRef<Stroke | null>(null);
   const geometryStart = useRef<{ x: number; y: number } | null>(null);
   const geometryRegion = useRef<Region | null>(null);
+  const [vectorDraft, setVectorDraft] = useState<VectorDraft | null>(null);
+  const vectorRef = useRef<VectorDraft | null>(null);
+  const penHandle = useRef<number | null>(null);
+  const lastPenClick = useRef<{ face: SideName; point: Point; time: number } | null>(null);
+  const [lineDraft, setLineDraft] = useState<LineGesture | null>(null);
+  const lineRef = useRef<LineGesture | null>(null);
+  const [vectorHover, setVectorHover] = useState<Point | null>(null);
+  const [textDraft, setTextDraft] = useState<{ face: SideName; id: string; text: string }>();
+  const [fontsReady, setFontsReady] = useState(false);
+  const selection = useMemo(() => selectedIds?.length ? selectedIds : selectedId ? [selectedId] : [], [selectedIds, selectedId]);
   const currentSide = project[sideName];
-  const referenceSrc = currentSide.reference?.src;
-  const side = useMemo(() => {
-    if (!draggedNode) return currentSide;
-    const original = currentSide.nodes.find(node => node.id === draggedNode.id);
-    const translateGroup = original?.groupId && original.width === draggedNode.width &&
-      original.height === draggedNode.height && original.rotation === draggedNode.rotation;
-    return { ...currentSide, nodes: currentSide.nodes.map(node => {
-      if (node.id === draggedNode.id) return draggedNode;
-      return translateGroup && node.groupId === original?.groupId && !node.locked
-        ? { ...node, x: node.x + draggedNode.x - original.x, y: node.y + draggedNode.y - original.y } : node;
-    }) };
-  }, [currentSide, draggedNode]);
-  const hasClips = side.nodes.some(node => node.clipRegionId && node.visible);
+  const textTarget = textEdit && project[textEdit.face].nodes.find(node => node.id === textEdit.id && node.type === 'text' && node.visible && !node.locked);
+  const textNode = useMemo(() => {
+    if (!textTarget || !textEdit) return undefined;
+    const text = textDraft?.face === textEdit.face && textDraft.id === textEdit.id ? textDraft.text : textTarget.text || '';
+    const draft = expandedTextDraft(textTarget, text);
+    const visibleFill = hasFill(draft) && (draft.fillOpacity ?? 1) > 0;
+    const visibleStroke = hasStroke(draft) && (draft.strokeOpacity ?? 1) > 0;
+    return draft.opacity > 0 && (visibleFill || visibleStroke) ? draft : {
+      ...draft, opacity: 1, fill: EDITOR_FOCUS, fillMode: 'solid' as const,
+      fillHidden: false, fillOpacity: 1, strokeHidden: true, clipRegionId: undefined,
+    };
+  }, [textTarget, textEdit?.face, textEdit?.id, textDraft, fontsReady]);
+  useEffect(() => { setTextDraft(undefined); }, [textEdit?.face, textEdit?.id]);
   useEffect(() => {
-    if (!hasClips) {setClippedArt(undefined);return;}
-    let current = true;
-    const snapshot = {...project,[sideName]:side};
-    renderCard(snapshot,sideName,{effects:false,transparentGround:true}).then(image => {
-      if (current) setClippedArt(image);
-    }).catch(() => {if(current)setClippedArt(undefined);});
-    return () => {current=false;};
-  },[hasClips,side,sideName,project.widthMm,project.heightMm]);
+    let alive = true;
+    document.fonts.ready.then(() => { if (alive) setFontsReady(true); });
+    return () => { alive = false; };
+  }, []);
+  useEffect(() => { if (textEdit && !textTarget) onTextCancel?.(); }, [textEdit, textTarget, onTextCancel]);
+  const activeGroup = findLayerGroup(currentSide, artworkGroupId);
+  const groupMembers = useMemo(() => activeGroup ? layerGroupMembers(currentSide, activeGroup.id) : undefined, [currentSide, activeGroup]);
+  const groupLocked = Boolean(groupMembers && currentSide.nodes.some(node => groupMembers.artworkIds.includes(node.id) && node.locked));
+  const frontDrag = dragged?.face === 'front' ? dragged.node : undefined;
+  const backDrag = dragged?.face === 'back' ? dragged.node : undefined;
+  const front = useMemo(() => {
+    const view = previewDrag(project, 'front', frontDrag, sideName === 'front' ? selection : [], sideName === 'front' ? activeGroup?.id : undefined);
+    return textNode && textEdit?.face === 'front' ? { ...view, nodes: view.nodes.map(node => node.id === textNode.id ? textNode : node) } : view;
+  }, [project, frontDrag, sideName, selection, activeGroup?.id, textNode, textEdit?.face]);
+  const back = useMemo(() => {
+    const view = previewDrag(project, 'back', backDrag, sideName === 'back' ? selection : [], sideName === 'back' ? activeGroup?.id : undefined);
+    return textNode && textEdit?.face === 'back' ? { ...view, nodes: view.nodes.map(node => node.id === textNode.id ? textNode : node) } : view;
+  }, [project, backDrag, sideName, selection, activeGroup?.id, textNode, textEdit?.face]);
+  const views = { front, back };
+  const side = views[sideName];
+  const artwork = {
+    front: useFaceArtwork(project, 'front', front, sideName === 'front' && flashOnly),
+    back: useFaceArtwork(project, 'back', back, sideName === 'back' && flashOnly),
+  };
+  const gradientNode = editGradient && !textNode && !regionMode && !highlightRegion && !plate && !flashOnly && tool === 'select'
+    ? side.nodes.find(node => node.id === selectedId && node.gradient && ['linear','radial'].includes(fillType(node)) &&
+      node.visible && !node.locked && !node.fillHidden)
+    : undefined;
   const width = project.widthMm * 10;
   const height = project.heightMm * 10;
   const { bleed: bleedBounds, trim: { cornerRadius } } = printGuideBounds(project);
-  const trimFit = Math.min((size.width - 130) / width, (size.height - 130) / height);
-  const fit = showGuides ? Math.min(trimFit,
-    (size.width - 52) / bleedBounds.width, (size.height - (hasModeNotice ? 144 : 122)) / bleedBounds.height) : trimFit;
-  const fitScale = Math.max(.06, fit);
+  const faceWidth = width + Math.max(width * .165, project.bleedMm * 20 + 24);
+  const spreadWidth = faceWidth + width;
+  const spreadWithBleed = faceWidth + bleedBounds.width;
+  const boardFit = Math.min((size.width * .737) / spreadWithBleed, (size.height - 120) / bleedBounds.height);
+  const fit = showGuides ? Math.min(boardFit,
+    (size.width - Math.min(52, size.width * .12)) / spreadWithBleed,
+    (size.height - 144) / bleedBounds.height) : boardFit;
+  const fitScale = Math.max(.01, fit);
   const fittedCamera: Camera = {
-    x: (size.width - width * fitScale) / 2,
-    y: (size.height - height * fitScale) / 2 + (showGuides ? (hasModeNotice ? 22 : 10) : 0),
+    x: (size.width - spreadWidth * fitScale) / 2,
+    y: (size.height - height * fitScale) / 2 + (showGuides ? 12 : 0),
     scale: fitScale, fitScale,
   };
   const origin = manualCamera ?? fittedCamera;
   const { scale } = origin;
-  const zoom = scale / origin.fitScale;
+  const faceOffset = (face: SideName) => face === 'back' ? faceWidth : 0;
+  const faceLeft = (face: SideName) => origin.x + faceOffset(face) * scale;
+  const faceDisabled = Boolean(faceLocked || regionMode);
+  const faceAt = (point?: Point | null) => {
+    if (!point || point.x < 0 || point.x > size.width || point.y < 0 || point.y > size.height ||
+      point.y < origin.y + bleedBounds.y * scale || point.y > origin.y + (bleedBounds.y + bleedBounds.height) * scale) return undefined;
+    return FACES.find(face => point.x >= faceLeft(face) + bleedBounds.x * scale &&
+      point.x <= faceLeft(face) + (bleedBounds.x + bleedBounds.width) * scale);
+  };
+  const draggedGroupId = (face: SideName, nodeId: string) => face === sideName && groupMembers?.artworkIds.includes(nodeId) ? activeGroup?.id : undefined;
+  const dragDestination = (from: SideName, nodeId: string) => {
+    if (from === sideName && selection.length > 1 && !draggedGroupId(from, nodeId)) return undefined;
+    const destination = faceAt(stageRef.current?.getPointerPosition());
+    return !faceDisabled && destination !== from ? destination : undefined;
+  };
   const handMode = tool === 'hand' || spaceHeld;
   const zoomAt = (factor: number, anchor: Point) => {
-    if (panStart.current || currentStroke.current || geometryStart.current || Konva.isDragging() ||
+    if (panStart.current || currentStroke.current || geometryStart.current || lineRef.current || penHandle.current !== null || Konva.isDragging() ||
       transformerRef.current?.isTransforming()) return;
     setManualCamera(previous => {
       const camera = previous ?? fittedCamera;
@@ -205,11 +367,10 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
     });
   };
   useImperativeHandle(navigationRef, () => ({
-    fit: () => { if (!panStart.current && !currentStroke.current && !geometryStart.current &&
+    fit: () => { if (!panStart.current && !currentStroke.current && !geometryStart.current && !lineRef.current && penHandle.current === null &&
       !Konva.isDragging() && !transformerRef.current?.isTransforming()) setManualCamera(null); },
     zoomBy: factor => zoomAt(factor, { x: size.width / 2, y: size.height / 2 }),
   }));
-  useEffect(() => { onZoom?.(zoom); }, [onZoom, zoom]);
   const activeRegion = side.regions.find(item => item.id === regionId);
   const paintedRegion = useMemo(() => activeRegion && draftStroke
     ? { ...activeRegion, strokes: [...activeRegion.strokes, draftStroke] } : activeRegion,
@@ -224,22 +385,6 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  useEffect(() => { setDraggedNode(null); }, [currentSide]);
-
-  useEffect(() => {
-    if (!referenceSrc || !referenceOpacity) return;
-    let current = true;
-    loadImage(referenceSrc).then(image => {
-      if (current) setReference({ src: referenceSrc, image });
-    }).catch(() => {});
-    return () => { current = false; };
-  }, [referenceSrc, Boolean(referenceOpacity)]);
-
-  useEffect(() => {
-    let current = true;
-    renderEffects(project, side, 1).then(canvas => { if (current) setEffectImage(canvas); }).catch(() => {});
-    return () => { current = false; };
-  }, [project.widthMm, project.heightMm, project.material, project.stockReflection, project.previewStyle, side]);
 
   useEffect(() => {
     let current = true;
@@ -264,24 +409,67 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
 
   useEffect(() => {
     let current = true;
-    if (!plate) { setPlateImage(undefined); return; }
-    renderCard(project, sideName, { plate, layerId:layerPlate }).then(canvas => { if (current) setPlateImage(canvas); }).catch(() => {});
+    if (!plate) { setPlatePreview(undefined); return; }
+    renderCard(project, sideName, { plate, layerId:layerPlate }).then(image => {
+      if (current) setPlatePreview({ face: sideName, channel: plate, layer: layerPlate, image });
+    }).catch(() => { if (current) setPlatePreview(undefined); });
     return () => { current = false; };
   }, [project, sideName, plate, layerPlate]);
+  const plateImage = platePreview?.face === sideName && platePreview.channel === plate &&
+    platePreview.layer === layerPlate ? platePreview.image : undefined;
 
   useEffect(() => {
     const transformer = transformerRef.current;
-    const node = selectedId && stageRef.current?.findOne('#' + selectedId);
+    const node = selectedId && stageRef.current?.findOne('#' + artworkId(sideName, selectedId));
     const selected = side.nodes.find(item => item.id === selectedId);
-    transformer?.nodes(node && selected && selected.visible && !selected.locked && !regionMode && !highlightRegion && tool === 'select' && !plate ? [node] : []);
+    transformer?.nodes(node && selected && !textNode && !activeGroup && selection.length <= 1 && selected.visible && !selected.locked && !regionMode && !highlightRegion && tool === 'select' && !plate && !flashOnly && !gradientNode ? [node] : []);
     transformer?.getLayer()?.batchDraw();
-  }, [selectedId, currentSide.nodes, tool, regionMode, highlightRegion, plate]);
+  }, [sideName, selectedId, selection.length, currentSide.nodes, tool, regionMode, highlightRegion, plate, flashOnly, gradientNode, activeGroup, textNode]);
 
-  const cardPoint = () => {
+  const cardPoint = (face: SideName = sideName) => {
     const position = stageRef.current?.getPointerPosition();
     if (!position) return null;
-    return { x: (position.x - origin.x) / scale, y: (position.y - origin.y) / scale };
+    return { x: (position.x - faceLeft(face)) / scale, y: (position.y - origin.y) / scale };
   };
+  const updateVector = (draft: VectorDraft | null) => { vectorRef.current = draft; setVectorDraft(draft); };
+  const cancelDrawing = () => {
+    updateVector(null); penHandle.current = null; lastPenClick.current = null;
+    lineRef.current = null; setLineDraft(null);
+    setVectorHover(null);
+  };
+  const finishVector = (closed = false) => {
+    const draft = vectorRef.current;
+    cancelDrawing();
+    if (!draft || draft.points.length < (closed ? 3 : 2)) return;
+    onCreateVector(draft.face, vectorFromPoints(draft.points, 'path', closed));
+  };
+  const finishDrawingGesture = () => {
+    penHandle.current = null;
+    const line = lineRef.current;
+    lineRef.current = null; setLineDraft(null);
+    if (line && Math.hypot(line.end.x - line.start.x, line.end.y - line.start.y) * scale >= 3) {
+      onCreateVector(line.face, vectorFromPoints([line.start, line.end], 'line', false));
+    }
+  };
+  useEffect(() => { cancelDrawing(); }, [project.id, tool, regionMode, plate]);
+  useEffect(() => {
+    if (vectorRef.current && vectorRef.current.face !== sideName) cancelDrawing();
+  }, [sideName]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (!(event.target instanceof HTMLElement) || event.target.closest('input,textarea,select,[contenteditable="true"],[role="dialog"]')) return;
+      if (!['pen', 'line'].includes(tool)) return;
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation(); cancelDrawing();
+      } else if (event.key === 'Enter' && tool === 'pen') {
+        event.preventDefault(); event.stopPropagation(); finishVector();
+      }
+    };
+    const blur = () => cancelDrawing();
+    window.addEventListener('keydown', keydown, true);
+    window.addEventListener('blur', blur);
+    return () => { window.removeEventListener('keydown', keydown, true); window.removeEventListener('blur', blur); };
+  });
   const finishStroke = () => {
     if (currentStroke.current && activeRegion) onRegionChange({ ...activeRegion, strokes: [...activeRegion.strokes, currentStroke.current] });
     currentStroke.current = null;
@@ -291,10 +479,12 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
     geometryRegion.current = null;
   };
   const startPan = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 1 && event.target instanceof Element && event.target.closest('[data-canvas-text-editor]')) return;
     if (panStart.current || !(event.button === 1 || (event.button === 0 && handMode)) ||
-      currentStroke.current || geometryStart.current || Konva.isDragging() ||
+      currentStroke.current || geometryStart.current || lineRef.current || penHandle.current !== null || Konva.isDragging() ||
       transformerRef.current?.isTransforming()) return;
     event.preventDefault();
+    lastPenClick.current = null;
     event.currentTarget.setPointerCapture(event.pointerId);
     panStart.current = { id: event.pointerId, pointer: { x: event.clientX, y: event.clientY }, camera: origin };
     setPointer(null);
@@ -318,6 +508,40 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
     if (handMode || panStart.current || ('button' in event.evt && event.evt.button !== 0)) return;
     const point = cardPoint();
     if (!point) return;
+    if (!regionMode && !plate && ['line', 'pen'].includes(tool)) {
+      const targetFace = vectorRef.current?.face ?? faceAt(stageRef.current?.getPointerPosition()) ?? sideName;
+      if (targetFace !== sideName && faceDisabled) return;
+      const position = cardPoint(targetFace)!;
+      if (targetFace !== sideName) onSelectFace(targetFace);
+      const additive = 'shiftKey' in event.evt && event.evt.shiftKey;
+      if (tool === 'line') {
+        const gesture = { face: targetFace, start: position, end: position };
+        lineRef.current = gesture; setLineDraft(gesture);
+        return;
+      }
+      const draft = vectorRef.current;
+      if (draft && draft.points.length >= 3 && Math.hypot(position.x - draft.points[0].x, position.y - draft.points[0].y) * scale <= 9) {
+        finishVector(true); return;
+      }
+      // Konva treats the entire card as one double-click target; a pen double-click
+      // must also land at the same screen position, including for touch input.
+      const screenPoint = stageRef.current!.getPointerPosition()!;
+      const previousClick = lastPenClick.current;
+      const now = performance.now();
+      if (draft && draft.points.length >= 2 && previousClick?.face === targetFace &&
+        now - previousClick.time <= 450 && Math.hypot(screenPoint.x - previousClick.point.x, screenPoint.y - previousClick.point.y) <= 6) {
+        finishVector(); return;
+      }
+      lastPenClick.current = { face: targetFace, point: { ...screenPoint }, time: now };
+      const previous = draft?.points.at(-1);
+      const next = previous ? snapAngle(previous, position, additive) : position;
+      if (previous && Math.hypot(next.x - previous.x, next.y - previous.y) * scale < 2) return;
+      if ((draft?.points.length || 0) >= MAX_PATH_POINTS) { finishVector(); return; }
+      const points = [...(draft?.points || []), next];
+      updateVector({ face: targetFace, points }); penHandle.current = points.length - 1;
+      setVectorHover(next);
+      return;
+    }
     if (regionMode && activeRegion && tool === 'geometry') {
       if (point.x < 0 || point.y < 0 || point.x > width || point.y > height) return;
       if (activeRegion.kind === 'polygon') {
@@ -332,10 +556,39 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
       setDraftStroke(currentStroke.current);
       return;
     }
-    if (event.target === event.target.getStage() || event.target.name() === 'card-ground') onSelect(null);
+    if (event.target === event.target.getStage() || event.target.name() === 'card-ground') {
+      const targetFace = faceAt(stageRef.current?.getPointerPosition());
+      if (targetFace && targetFace !== sideName) {
+        if (!faceDisabled) onSelectFace(targetFace);
+      } else onSelect(null);
+    }
   };
-  const move = () => {
-    if (panStart.current) return;
+  const move = (event: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
+    if (panStart.current || handMode) return;
+    const shift = 'shiftKey' in event.evt && event.evt.shiftKey;
+    if (lineRef.current) {
+      const gesture = lineRef.current, point = cardPoint(gesture.face);
+      if (point) { const next = { ...gesture, end: snapAngle(gesture.start, point, shift) }; lineRef.current = next; setLineDraft(next); }
+      return;
+    }
+    if (tool === 'pen' && vectorRef.current) {
+      const draft = vectorRef.current, point = cardPoint(draft.face);
+      if (!point) return;
+      const last = draft.points.at(-1)!;
+      setVectorHover(snapAngle(last, point, shift));
+      if (penHandle.current !== null) {
+        const index = penHandle.current, anchor = draft.points[index];
+        const end = snapAngle(anchor, point, shift);
+        if (Math.hypot(end.x - anchor.x, end.y - anchor.y) * scale > 3) {
+          lastPenClick.current = null;
+          const points = draft.points.map((item, i) => i === index ? { ...item,
+            in: { x: 2 * anchor.x - end.x, y: 2 * anchor.y - end.y }, out: end } : item);
+          updateVector({ ...draft, points });
+        }
+      }
+      return;
+    }
+    if (!regionMode) return;
     const point = cardPoint();
     setPointer(point);
     if (point && geometryStart.current && activeRegion) {
@@ -354,37 +607,111 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
       setDraftStroke(currentStroke.current);
     }
   };
-  const commitNode = (node: CardNode) => {
-    setDraggedNode(null); setSnap({ x: false, y: false });
+  const commitNode = (face: SideName, node: CardNode) => {
+    setDragged(null); setSnap({ x: false, y: false });
+    const currentSide = project[face];
     const previous = currentSide.nodes.find(item => item.id === node.id);
-    const translateGroup = previous?.groupId && node.width === previous.width &&
+    const translating = previous && node.width === previous.width &&
       node.height === previous.height && node.rotation === previous.rotation;
+    const translateGroup = translating && previous.groupId && !findLayerGroup(currentSide, previous.groupId);
     const dx = node.x - (previous?.x ?? node.x);
     const dy = node.y - (previous?.y ?? node.y);
+    const groupId = draggedGroupId(face, node.id);
+    if (groupId && translating) {
+      const next = moveArtworkGroup(project, face, groupId, { x: dx, y: dy });
+      if (next) onChange(next, face);
+      else if (previous) stageRef.current?.findOne('#' + artworkId(face, node.id))?.position(previous);
+      return;
+    }
     onChange({ ...currentSide, nodes: currentSide.nodes.map(item => {
       if (item.id === node.id) return node;
-      return translateGroup && item.groupId === previous?.groupId && !item.locked
+      const selectedTogether = face === sideName && selection.includes(node.id) && selection.includes(item.id);
+      return ((translateGroup && item.groupId === previous?.groupId) || (selectedTogether && item.visible)) && !item.locked
         ? { ...item, x: item.x + dx, y: item.y + dy } : item;
-    }) });
+    }) }, face);
   };
-  const dragNode = (node: CardNode) => {
-    const closeX = Math.abs(node.x + node.width / 2 - width / 2) < 6 / scale;
+  const dragNode = (face: SideName, node: CardNode) => {
+    const destination = dragDestination(face, node.id);
+    const centerX = faceOffset(destination ?? face) - faceOffset(face) + width / 2;
+    const closeX = Math.abs(node.x + node.width / 2 - centerX) < 6 / scale;
     const closeY = Math.abs(node.y + node.height / 2 - height / 2) < 6 / scale;
-    if (closeX) node.x = (width - node.width) / 2;
+    if (closeX) node.x = centerX - node.width / 2;
     if (closeY) node.y = (height - node.height) / 2;
-    stageRef.current?.findOne('#' + node.id)?.position({ x: node.x, y: node.y });
-    setDraggedNode(node); setSnap({ x: closeX, y: closeY });
+    stageRef.current?.findOne('#' + artworkId(face, node.id))?.position({ x: node.x, y: node.y });
+    setDragged({ face, node, destination }); setSnap({ x: closeX, y: closeY });
   };
+  const dropNode = (face: SideName, node: CardNode, cancelled: boolean) => {
+    const destination = cancelled ? undefined : dragDestination(face, node.id);
+    if (!cancelled && !destination) {
+      commitNode(face, node);
+      return;
+    }
+    setDragged(null); setSnap({ x: false, y: false });
+    const groupId = draggedGroupId(face, node.id);
+    if (destination && !onTransferArtwork(face, destination, node.id, {
+      x: node.x + faceOffset(face) - faceOffset(destination), y: node.y,
+    }, groupId)) {
+      if (groupId) {
+        const original = project[face].nodes.find(item => item.id === node.id);
+        if (original) stageRef.current?.findOne('#' + artworkId(face, node.id))?.position(original);
+      } else commitNode(face, node);
+    }
+  };
+  const dropTarget = dragged?.destination ?? sidebarDropFace;
+  const snapFace = dragged?.destination ?? dragged?.face;
+  const penCanClose = !!(vectorDraft && vectorDraft.points.length >= 3 && vectorHover &&
+    Math.hypot(vectorHover.x - vectorDraft.points[0].x, vectorHover.y - vectorDraft.points[0].y) * scale <= 9);
+  const vectorTool = !regionMode && ['line', 'pen'].includes(tool);
+  // Keep the source above the destination while Konva is still dragging the original node.
+  const drawOrder = dragged?.destination === 'back' ? ['back', 'front'] as const : FACES;
 
   return <div ref={holder} className="editor-canvas" data-testid="editor-canvas"
+    data-canvas-tool={tool} data-vector-points={vectorDraft?.points.length || 0}
+    data-drawing-face={vectorDraft?.face ?? lineDraft?.face}
+    data-selected-count={selection.length}
+    data-artwork-group={activeGroup?.id} data-group-locked={groupLocked || undefined}
     onPointerDownCapture={startPan} onPointerMove={movePan} onPointerUp={endPan}
     onPointerCancel={endPan} onLostPointerCapture={endPan}
     style={{ width: '100%', height: '100%', minHeight: 100, position: 'relative', overflow: 'hidden',
-      backgroundPosition: `${origin.x % 17}px ${origin.y % 17}px`,
-      touchAction: 'none', cursor: panning ? 'grabbing' : handMode ? 'grab' : regionMode && ['brush', 'eraser'].includes(tool) ? 'none' : tool === 'geometry' ? 'crosshair' : 'default' }}>
+      backgroundPosition: `${origin.x % 8}px ${origin.y % 8}px`,
+      touchAction: 'none', cursor: panning ? 'grabbing' : handMode ? 'grab' : regionMode && ['brush', 'eraser'].includes(tool) ? 'none' : tool === 'geometry' || vectorTool ? 'crosshair' : 'default' }}>
     <Stage ref={stageRef} width={size.width} height={size.height} onMouseDown={down} onTouchStart={down}
-      onMouseMove={move} onTouchMove={move} onMouseUp={finishStroke} onTouchEnd={finishStroke} onTouchCancel={finishStroke}
-      onMouseLeave={() => { finishStroke(); setPointer(null); }}
+      onContextMenu={event => {
+        event.evt.preventDefault();
+        if (faceDisabled || textEdit) return;
+        const stage = stageRef.current!;
+        stage.setPointersPositions(event.evt);
+        const hit = event.target.findAncestor('.artwork-node', true);
+        const hitFace = hit?.findAncestor('.card-face-back') ? 'back' : hit ? 'front' : undefined;
+        const face = hitFace ?? faceAt(stage.getPointerPosition()) ?? sideName;
+        let node = hit && project[face].nodes.find(item => artworkId(face,item.id) === hit.id());
+        // Locked artwork ignores normal pointer input, but its context menu must still allow unlocking.
+        const layers = project[face].nodes;
+        const at = stage.getPointerPosition();
+        if (at && !(face === sideName && (plate || flashOnly))) {
+          const context = stage.content.querySelector('canvas')?.getContext('2d');
+          for (let i=layers.length-1; context && i>=0 && layers[i]!==node; i--) {
+            const candidate=layers[i];
+            if (!candidate.visible || candidate.type==='empty' || !candidate.locked) continue;
+            const shape=stage.findOne('#'+artworkId(face,candidate.id));
+            if (!shape) continue;
+            const local=shape.getAbsoluteTransform().copy().invert().point(at);
+            const x=candidate.flipX?candidate.width-local.x:local.x, y=candidate.flipY?candidate.height-local.y:local.y;
+            context.save(); context.resetTransform();
+            context.lineWidth=Math.max(candidate.strokeWidth||0,8/scale);
+            const path=artworkPath(candidate);
+            const inside=isOpenVector(candidate)?context.isPointInStroke(path,x,y):context.isPointInPath(path,x,y);
+            context.restore();
+            if (inside) { node=candidate; break; }
+          }
+        }
+        const point = cardPoint(face);
+        if (point) onCanvasMenu(face, point, {x:event.evt.clientX,y:event.evt.clientY}, node?.id);
+      }}
+      onMouseMove={move} onTouchMove={move}
+      onMouseUp={() => { finishStroke(); finishDrawingGesture(); }} onTouchEnd={() => { finishStroke(); finishDrawingGesture(); }}
+      onTouchCancel={() => { finishStroke(); cancelDrawing(); }}
+      onMouseLeave={() => { finishStroke(); finishDrawingGesture(); setPointer(null); setVectorHover(null); }}
       onWheel={event => {
         const wheel = event.evt;
         wheel.preventDefault();
@@ -393,52 +720,140 @@ export default function EditorCanvas({ project, side: sideName, selectedId, onSe
         if (anchor && delta) zoomAt(Math.exp(-Math.max(-240, Math.min(240, delta)) * .002), anchor);
       }}>
       <Layer>
-        <Group x={origin.x} y={origin.y} scaleX={scale} scaleY={scale}>
-          <Rect name="card-ground" width={width} height={height} fill="#ffffff" cornerRadius={cornerRadius}
-            shadowColor="#000000" shadowOpacity={0.28} shadowBlur={34 / scale} shadowOffsetY={14 / scale} />
-          {/* Artwork stays interactive across the workspace. The card's composite and guides use trim coordinates. */}
-          {!plate && currentSide.nodes.map((node, index) => <ArtworkNode key={node.id} node={draggedNode?.id === node.id ? node : side.nodes[index]}
-            interactive={tool === 'select' && !regionMode && !handMode && !panning}
-            onSelect={() => onSelect(node.id)} onCommit={commitNode} onDrag={dragNode}
-            onTransformPreview={setDraggedNode}
-            onTextEdit={() => { if (node.type === 'text') onTextEdit?.(node.id); }} />)}
-          <Group clipFunc={context => { context.beginPath(); context.roundRect(0, 0, width, height, cornerRadius); context.closePath(); }}>
-            {!plate && hasClips && clippedArt && <>
-              <Rect width={width} height={height} fill="#ffffff" listening={false} />
-              <KonvaImage image={clippedArt} width={width} height={height} listening={false} />
-            </>}
-            {effectImage && !regionMode && !plate && <KonvaImage image={effectImage} width={width} height={height} listening={false} />}
-            {!!referenceOpacity && !regionMode && !plate && reference && reference.src === referenceSrc && <KonvaImage
-              image={reference.image} width={width} height={height} opacity={referenceOpacity} listening={false} />}
-            {plate && plateImage && <KonvaImage image={plateImage} width={width} height={height} listening={false} />}
-            {regionMode && <Rect width={width} height={height} fill="#000000" opacity={.3} listening={false} />}
-            {regionMode && activeRegion?.kind === 'polygon' && activeRegion.points?.map((value, i, points) =>
-              i % 2 === 0 ? <Ellipse key={i} x={value} y={points[i+1]} radiusX={3 / scale} radiusY={3 / scale}
-                fill="#a0ffdb" stroke="#264638" strokeWidth={1 / scale} listening={false}/> : null)}
-            {(regionMode || highlightRegion) && regionImage && <KonvaImage image={regionImage} width={width} height={height} opacity={regionMode ? .65 : .32} listening={false} />}
-          </Group>
-          {showGuides ? <PrintGuideLines project={project} scale={scale} /> :
-            <Rect width={width} height={height} cornerRadius={cornerRadius}
-              stroke="rgba(214,225,216,.5)" strokeWidth={1 / scale} listening={false} />}
-          {snap.x && <Line points={[width / 2, -30, width / 2, height + 30]} stroke="#64dabc" strokeWidth={1 / scale} listening={false} />}
-          {snap.y && <Line points={[-30, height / 2, width + 30, height / 2]} stroke="#64dabc" strokeWidth={1 / scale} listening={false} />}
-          <Transformer ref={transformerRef} rotateEnabled={!regionMode} flipEnabled={false} listening={!handMode && !panning}
-            borderStroke="#77d8c4" anchorStroke="#449a86" anchorFill="#ffffff" anchorSize={7}
-            anchorCornerRadius={2} borderStrokeWidth={1} rotateAnchorOffset={24}
-            boundBoxFunc={(oldBox, newBox) => Math.abs(newBox.width) < 10 || Math.abs(newBox.height) < 10 ? oldBox : newBox} />
-          {!handMode && !panning && regionMode && pointer && ['brush', 'eraser'].includes(tool) && <Ellipse
-            x={pointer.x} y={pointer.y} radiusX={brushSize / 2} radiusY={brushSize / 2}
-            stroke={tool === 'eraser' ? '#ffb19d' : '#ffffff'} strokeWidth={1.5 / scale}
-            fill="rgba(255,255,255,.08)" listening={false} />}
-        </Group>
+        {drawOrder.map(face => {
+          const editing = face === sideName;
+          const facePlate = editing ? plate : undefined;
+          const painting = editing && regionMode;
+          const showMask = editing && (regionMode || highlightRegion);
+          const original = project[face];
+          const composite = artwork[face];
+          return <Group key={face} name={`card-face-${face}`} x={faceLeft(face)} y={origin.y} scaleX={scale} scaleY={scale}>
+            <Rect name="card-ground" {...bleedBounds} fill="#ffffff"
+              shadowColor="#000000" shadowOpacity={0.28} shadowBlur={34 / scale} shadowOffsetY={14 / scale} />
+            {/* Artwork stays interactive beyond the trim area, in the coordinates of its own face. */}
+            {!facePlate && original.nodes.map((node, index) => <ArtworkNode key={node.id} face={face}
+              node={dragged?.face === face && dragged.node.id === node.id ? node : views[face].nodes[index]}
+              interactive={tool === 'select' && !regionMode && !handMode && !panning && !(editing && flashOnly) && (editing || !faceDisabled)}
+              canDrag={!(textEdit?.face === face && textNode?.id === node.id) && !(editing && groupLocked && groupMembers?.artworkIds.includes(node.id))}
+              onSelect={additive => {
+                if (editing) { if (additive || !(activeGroup && groupMembers?.artworkIds.includes(node.id)) && !(selection.length > 1 && selection.includes(node.id))) onSelect(node.id, additive); }
+                else onSelectFace(face, node.id);
+              }}
+              onCommit={value => commitNode(face, value)} onDrag={value => dragNode(face, value)}
+              onDrop={(value, cancelled) => dropNode(face, value, cancelled)}
+              onTransformPreview={value => setDragged({ face, node: value })}
+              onTextEdit={() => { if (node.type === 'text' && node.visible && !node.locked) onTextEdit?.(face, node.id); }} />)}
+            <Group clipFunc={context => {
+              context.beginPath();
+              context.roundRect(bleedBounds.x, bleedBounds.y, bleedBounds.width, bleedBounds.height, bleedBounds.cornerRadius);
+              context.closePath();
+            }}>
+              {!facePlate && composite.clipped && <>
+                <Rect width={width} height={height} fill="#ffffff" listening={false} />
+                <KonvaImage image={composite.clipped} width={width} height={height} listening={false} />
+              </>}
+              {composite.effects && !painting && !facePlate && <KonvaImage image={composite.effects} width={width} height={height} listening={false} />}
+              {facePlate && plateImage && <KonvaImage image={plateImage} width={width} height={height} listening={false} />}
+              {painting && <Rect width={width} height={height} fill="#000000" opacity={.3} listening={false} />}
+              {painting && activeRegion?.kind === 'polygon' && activeRegion.points?.map((value, i, points) =>
+                i % 2 === 0 ? <Ellipse key={i} x={value} y={points[i+1]} radiusX={3 / scale} radiusY={3 / scale}
+                  fill={EDITOR_FOCUS} stroke={EDITOR_BLUE} strokeWidth={1 / scale} listening={false}/> : null)}
+              {showMask && regionImage && <KonvaImage image={regionImage} width={width} height={height} opacity={painting ? .65 : .32} listening={false} />}
+            </Group>
+            {!facePlate && original.nodes.filter(node => node.visible && !node.locked && !(textEdit?.face === face && textNode?.id === node.id) &&
+              editing && ((activeGroup && groupMembers?.artworkIds.includes(node.id)) ||
+                (selection.length > 1 && selection.includes(node.id))))
+              .map(node => {
+                const shown = views[face].nodes.find(item => item.id === node.id) || node;
+                return <Rect key={'selection-' + node.id} x={shown.x} y={shown.y} width={shown.width} height={shown.height}
+                  rotation={shown.rotation} stroke={EDITOR_BLUE} strokeWidth={1 / scale} listening={false}/>;
+              })}
+            {lineDraft?.face === face && <Group listening={false}>
+              <Line points={[lineDraft.start.x, lineDraft.start.y, lineDraft.end.x, lineDraft.end.y]}
+                stroke={EDITOR_FOCUS} strokeWidth={1.5 / scale} lineCap="round"/>
+              {[lineDraft.start, lineDraft.end].map((point, index) => <Rect key={index}
+                x={point.x - 3 / scale} y={point.y - 3 / scale} width={6 / scale} height={6 / scale}
+                fill="#ffffff" stroke={EDITOR_BLUE} strokeWidth={1 / scale}/>)}
+            </Group>}
+            {vectorDraft?.face === face && <Group listening={false}>
+              <Shape sceneFunc={context => {
+                const raw = context._context;
+                const points = vectorHover && penHandle.current === null ? [...vectorDraft.points, vectorHover] : vectorDraft.points;
+                raw.beginPath(); traceVectorPath(raw, points, 1, 1);
+                raw.strokeStyle = EDITOR_FOCUS; raw.lineWidth = 1.5 / scale; raw.lineJoin = 'round'; raw.stroke();
+              }}/>
+              {vectorDraft.points.map((point, index) => <Group key={index}>
+                {[point.in, point.out].map((handle, handleIndex) => handle && <Group key={handleIndex}>
+                  <Line points={[point.x, point.y, handle.x, handle.y]} stroke="#a3a3a3" strokeWidth={1 / scale}/>
+                  <Circle x={handle.x} y={handle.y} radius={2.8 / scale} fill="#ffffff" stroke={EDITOR_BLUE} strokeWidth={1 / scale}/>
+                </Group>)}
+                {index === 0 && penCanClose && <Circle x={point.x} y={point.y} radius={7 / scale}
+                  stroke={EDITOR_FOCUS} strokeWidth={1.3 / scale} fill="rgba(35,122,194,.16)"/>}
+                <Rect x={point.x - 3 / scale} y={point.y - 3 / scale} width={6 / scale} height={6 / scale}
+                  fill={index === vectorDraft.points.length - 1 ? EDITOR_FOCUS : '#ffffff'} stroke={EDITOR_BLUE} strokeWidth={1 / scale}/>
+              </Group>)}
+            </Group>}
+            <Rect name="card-frame" {...bleedBounds}
+              stroke="rgba(220,220,220,.5)" strokeWidth={1 / scale} listening={false} />
+            {showGuides && <PrintGuideLines project={project} scale={scale} />}
+            {snapFace === face && snap.x && <Line points={[width / 2, -30, width / 2, height + 30]} stroke={EDITOR_FOCUS} strokeWidth={1 / scale} listening={false} />}
+            {snapFace === face && snap.y && <Line points={[-30, height / 2, width + 30, height / 2]} stroke={EDITOR_FOCUS} strokeWidth={1 / scale} listening={false} />}
+            {editing && <Transformer ref={transformerRef} rotateEnabled={!regionMode} flipEnabled={false} listening={!handMode && !panning}
+              borderStroke={EDITOR_BLUE} anchorStroke={EDITOR_BLUE} anchorFill="#ffffff" anchorSize={7}
+              anchorCornerRadius={2} borderStrokeWidth={1} rotateAnchorOffset={24}
+              boundBoxFunc={(oldBox, newBox) => {
+                const selected = currentSide.nodes.find(node => node.id === selectedId);
+                const minimum = selected?.type === 'line' || selected?.type === 'path' ? .1 : 10;
+                return Math.abs(newBox.width) < minimum || Math.abs(newBox.height) < minimum ? oldBox : newBox;
+              }} />}
+            {editing && gradientNode?.gradient && !handMode && !panning && onGradientChange && <GradientHandles
+              node={{ ...gradientNode, gradient: gradientNode.gradient }} scale={scale}
+              onStart={onGradientStart} onChange={onGradientChange}/>}
+            {!handMode && !panning && painting && pointer && ['brush', 'eraser'].includes(tool) && <Ellipse
+              x={pointer.x} y={pointer.y} radiusX={brushSize / 2} radiusY={brushSize / 2}
+              stroke={tool === 'eraser' ? '#ffb19d' : '#ffffff'} strokeWidth={1.5 / scale}
+              fill="rgba(255,255,255,.08)" listening={false} />}
+          </Group>;
+        })}
       </Layer>
     </Stage>
-    <div ref={cardBoundsRef} data-card-bounds aria-hidden="true"
-      style={{ position: 'absolute', pointerEvents: 'none', left: origin.x, top: origin.y, width: width * scale, height: height * scale }} />
-    {!showGuides && <div style={{ position: 'absolute', left: origin.x, top: origin.y + height * scale + 20,
-      width: width * scale, color: '#9a9a9a', fontSize: 11, display: 'flex', justifyContent: 'space-between', pointerEvents: 'none', whiteSpace: 'nowrap' }}>
-      <span>{sideName === 'front' ? '正面' : '背面'} · {project.widthMm} × {project.heightMm} mm</span>
-      <span>{regionMode || highlightRegion ? '绿色为作用区域' : plate ? '生产工艺版' : '材质效果示意'}</span>
+    {textNode && textEdit && <CanvasTextEditor key={`${project.id}:${textEdit.face}:${textNode.id}`}
+      node={textNode} face={textEdit.face} scale={scale}
+      left={faceLeft(textEdit.face) + textNode.x * scale} top={origin.y + textNode.y * scale}
+      onDraft={text => setTextDraft({ ...textEdit, text })}
+      onCommit={text => onTextCommit?.(textEdit.face, textNode.id, text)} onCancel={() => onTextCancel?.()}
+      onWheel={event => {
+        const bounds = holder.current?.getBoundingClientRect();
+        if (!bounds) return;
+        const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? size.height : 1);
+        if (delta) zoomAt(Math.exp(-Math.max(-240, Math.min(240, delta)) * .002),
+          { x: event.clientX - bounds.left, y: event.clientY - bounds.top });
+      }}/>}
+    {vectorTool && !handMode && <div className="canvas-tool-hint" role="status" aria-live="polite">
+      <strong>{tool === 'pen' ? penCanClose ? '闭合路径' : vectorDraft ? `钢笔 · ${vectorDraft.points.length} 个节点` : '钢笔' : '直线'}</strong>
+      <span>{tool === 'pen' ? '单击添加节点 · 拖动设置曲线 · Enter 完成 · Esc 取消' :
+        '拖动绘制 · Shift 锁定角度 · Esc 取消'}</span>
     </div>}
+    {FACES.map(face => {
+      const editing = face === sideName;
+      const left = faceLeft(face);
+      const boardLeft = left + bleedBounds.x * scale;
+      const boardTop = origin.y + bleedBounds.y * scale;
+      const label = face === 'front' ? '正面' : '背面';
+      const labelOnScreen = boardLeft >= 0 && boardLeft + 34 <= size.width && boardTop >= 26 && boardTop <= size.height;
+      return <Fragment key={face}>
+        <div data-card-artboard={face} data-board-space="bleed"
+          data-drop-target={dropTarget === face ? true : undefined} aria-hidden="true"
+          style={{ position: 'absolute', pointerEvents: 'none', left: boardLeft, top: boardTop,
+            width: bleedBounds.width * scale, height: bleedBounds.height * scale, borderRadius: bleedBounds.cornerRadius * scale }} />
+        <div ref={editing ? cardBoundsRef : undefined} data-card-bounds={editing ? true : undefined} data-card-face={face}
+          data-card-trim={face} aria-hidden="true"
+          style={{ position: 'absolute', pointerEvents: 'none', left, top: origin.y, width: width * scale, height: height * scale, borderRadius: cornerRadius * scale }} />
+        <button type="button" className="canvas-face-label" data-face-label={face} aria-pressed={editing}
+          data-drop-target={dropTarget === face ? true : undefined}
+          disabled={faceDisabled && !editing} tabIndex={labelOnScreen ? 0 : -1} style={{ left: boardLeft, top: boardTop }}
+          onClick={() => { if (!faceDisabled) onSelectFace(face); }}>{label}</button>
+      </Fragment>;
+    })}
   </div>;
 }

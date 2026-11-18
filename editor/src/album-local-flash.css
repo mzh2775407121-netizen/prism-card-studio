@@ -1,0 +1,94 @@
+/* Each finish keeps its own card-sized mask and shares the inspector's incident light. */
+.prism-card-inspector .inspector-local-flash {
+  --light-x: var(--pointer-x, 50%);
+  --light-y: var(--pointer-y, 50%);
+  --sweep: var(--flash-sweep, 50%);
+  --tilt: var(--flash-tilt, 0deg);
+  --direction: calc(var(--flash-angle) + 65deg + var(--tilt) * .42);
+  --spectrum: linear-gradient(var(--direction),
+    #8a76e35c calc(var(--sweep) - 36%), #47ccdc95 calc(var(--sweep) - 15%),
+    #b0f5ff calc(var(--sweep) - 4%), #fffae0 calc(var(--sweep) + 4%),
+    #f1a1d9ad calc(var(--sweep) + 18%), #8a77e15c calc(var(--sweep) + 36%));
+  --light-falloff: radial-gradient(ellipse 91% 78% at var(--light-x) var(--light-y),
+    #000 3%, #000b 46%, #0004 79%, #0001 100%);
+  position: relative;
+  z-index: 1;
+  transform: none;
+  mask: var(--flash-mask) center / 100% 100% no-repeat;
+  opacity: calc(var(--flash-opacity) * (.66 + .34 * var(--card-opacity)));
+}
+
+.prism-card-inspector .inspector-local-flash::before,
+.prism-card-inspector .inspector-local-flash::after {
+  position: absolute;
+  inset: 0;
+  background-repeat: no-repeat;
+}
+
+/* The three original album textures catch light at different points in the sweep. */
+.prism-card-inspector .inspector-local-flash[data-flash-style="cosmos"] {
+  background: radial-gradient(ellipse 57% 48% at var(--light-x) var(--light-y), #b7a7e830, transparent 94%);
+}
+.prism-card-inspector .inspector-local-flash[data-flash-style="cosmos"]::before {
+  content: "";
+  mask: url("/assets/album/cosmos-bottom.png") center / 100% 100% no-repeat luminance;
+  background: var(--spectrum);
+}
+.prism-card-inspector .inspector-local-flash[data-flash-style="cosmos"]::after {
+  content: "";
+  mask: url("/assets/album/cosmos-top-trans.png") center / 100% 100% no-repeat alpha,
+    url("/assets/album/cosmos-middle-trans.png") center / 100% 100% no-repeat alpha;
+  background:
+    radial-gradient(ellipse 55% 48% at var(--light-x) var(--light-y), #fffde8 2%, #b8f0ffdb 22%, #bd93f773 51%, transparent 99%),
+    linear-gradient(calc(var(--direction) + 110deg),
+      #9c71db22, #64d9dc73 calc(100% - var(--sweep) - 18%), #f7b4d3b3 calc(100% - var(--sweep) + 3%), #606fbb25);
+}
+
+/* Geometry stays registered to the card. Only the reflection moves across it. */
+.prism-card-inspector .inspector-local-flash[data-flash-style="geometric"]::before {
+  content: "";
+  mask: url("/assets/album/geometric.png") center / 43% auto repeat luminance;
+  background:
+    radial-gradient(ellipse 48% 47% at var(--light-x) var(--light-y), #fffdf3f5 0%, #baf7eedb 20%, transparent 77%),
+    var(--spectrum);
+}
+
+.prism-card-inspector .inspector-local-flash[data-flash-style="glitter"]::before {
+  content: "";
+  mask: url("/assets/album/glitter.png") center / 36% auto repeat luminance;
+  background: var(--spectrum);
+}
+.prism-card-inspector .inspector-local-flash[data-flash-style="glitter"]::after {
+  content: "";
+  mask: url("/assets/album/glitter.png") 0 0 / 29% auto repeat luminance;
+  mask-position: calc(3px + (var(--pointer-from-left) - .5) * 2px)
+    calc(-5px + (var(--pointer-from-top) - .5) * 2px);
+  background: radial-gradient(ellipse 67% 57% at var(--light-x) var(--light-y), #fffdea 1%, #effeffed 29%, #e6c4fc75 65%, transparent);
+}
+
+.prism-card-inspector .inspector-local-flash[data-flash-style="linear"] {
+  background: var(--spectrum);
+}
+.prism-card-inspector .inspector-local-flash[data-flash-style="linear"]::before {
+  content: "";
+  background: repeating-linear-gradient(calc(var(--flash-angle) + 65deg),
+    #f4ffff04 0 4px, #e3feff72 5px, #e3feff00 7px 15px);
+  mask: var(--light-falloff);
+}
+.prism-card-inspector .inspector-local-flash[data-flash-style="linear"]::after {
+  content: "";
+  background: linear-gradient(var(--direction), transparent calc(var(--sweep) - 15%),
+    #fffaeaed var(--sweep), #fffffe00 calc(var(--sweep) + 12%));
+}
+
+.prism-card-inspector .inspector-local-flash[data-flash-style="radial"]::before {
+  content: "";
+  background:
+    repeating-conic-gradient(from calc(var(--flash-angle) + var(--tilt) * 1.3) at 83% 46%,
+      #8d87d65d 0deg, #4eb4da26 6deg, #8ae4ed9c 9deg, #fff7c8 12deg, #cda2f96e 15deg, #8d87d65d 22.5deg);
+  mask: var(--light-falloff);
+}
+.prism-card-inspector .inspector-local-flash[data-flash-style="radial"]::after {
+  content: "";
+  background: radial-gradient(ellipse 56% 52% at var(--light-x) var(--light-y), #fff5c7b0, #c6b4ff3b 37%, transparent 91%);
+}

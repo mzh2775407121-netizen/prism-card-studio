@@ -4,14 +4,15 @@ import { ChevronLeft, ChevronRight, Download, X } from 'lucide-react';
 import { loadInspectorFace, type InspectorFace } from './albumInspectorAssets';
 import { getCardCornerRadiusMm, type Project, type SideName } from './model';
 import './album-materials.css';
+import './album-local-flash.css';
 import './album-preview.css';
 
 // Motion ported from 藏光's CardInspector.jsx and HoloCard.jsx.
 const POPOVER = { stiffness: .033, damping: .45 };
 const INTERACT = { stiffness: .066, damping: .25 };
 const TILT = { stiffness: .05, damping: .5 };
-const MAX_YAW = 5;
-const MAX_PITCH = 4;
+const MAX_YAW = 9;
+const MAX_PITCH = 7;
 const spring = (value: number) => ({ value, last: value, target: value });
 type Spring = ReturnType<typeof spring>;
 type Light = { x: number; y: number; o: number };
@@ -41,6 +42,8 @@ function setLight(element: HTMLElement, x: number, y: number, opacity: number) {
     '--background-x': (37 + x * .26) + '%',
     '--background-y': (33 + y * .34) + '%',
     '--card-opacity': Math.round(opacity * 100) / 100,
+    '--flash-sweep': (x * .72 + y * .28) + '%',
+    '--flash-tilt': ((x - 50) * .58 + (y - 50) * .31) + 'deg',
   };
   for (const [key, value] of Object.entries(values)) {
     if (element.style.getPropertyValue(key) !== String(value)) element.style.setProperty(key, String(value));
@@ -51,6 +54,12 @@ function CardFace({ face, artwork, visible }: { face: SideName; artwork: Inspect
   return <div className={'card__front inspector-card-face ' + face} aria-hidden={!visible}
     style={{ '--glare-mask': 'url("' + artwork.glare + '")' } as CSSProperties}>
     <img src={artwork.artwork} alt={face === 'front' ? '卡片正面' : '卡片背面'} draggable={false}/>
+    {artwork.flashes.map(flash => <div key={flash.id} className="inspector-local-flash" data-flash-style={flash.style}
+      style={{
+        '--flash-mask': 'url("' + flash.mask + '")',
+        '--flash-angle': flash.angle + 'deg',
+        '--flash-opacity': flash.opacity,
+      } as CSSProperties}/>)}
     <div className="card__glare"/>
   </div>;
 }
@@ -118,12 +127,14 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     const dt = Math.max(.25, Math.min(2, (now - previousTick.current) / (1000 / 60)));
     previousTick.current = now;
     const age = now - m.started;
-    const sweeping = m.reveal && !m.closing && age < 1000 && !reduced.current;
+    const turning = Math.abs(m.spin.target - m.spin.value) > .3;
+    const sweeping = !m.closing && !reduced.current && (turning || (m.reveal && age < 1000));
     const target = m.closing ? rest : motion.current
       ? { x: 50 + Math.sin(now / 1900) * 39, y: 50 + Math.cos(now / 2600) * 36, o: 1 }
       : pointer.current;
-    m.gx.target = sweeping ? 50 + Math.sin(m.spin.value * Math.PI / 180) * 32 : target.x;
-    m.gy.target = sweeping ? 45 + Math.cos(m.spin.value * Math.PI / 180) * 18 : target.y;
+    const spinRadians = m.spin.value * Math.PI / 180;
+    m.gx.target = sweeping ? 50 + Math.sin(spinRadians) * 44 : target.x;
+    m.gy.target = sweeping ? 50 - Math.sin(spinRadians * 2) * 22 : target.y;
     m.opacity.target = sweeping ? .85 : target.o;
     m.rx.target = m.closing || reduced.current ? 0 : -(clamp(target.x) - 50) / 50 * MAX_YAW;
     m.ry.target = m.closing || reduced.current ? 0 : (clamp(target.y) - 50) / 50 * MAX_PITCH;
@@ -321,7 +332,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
           <button ref={close} className="inspector-icon close-button" onClick={dismiss} aria-label="返回编辑"><X size={19}/></button>
         </div>
         <div ref={arena} className="inspect-arena" onPointerMove={move} onPointerLeave={leave}
-          onPointerDown={event => { startPointer.current = { x: event.clientX, y: event.clientY }; dragged.current = false; }}
+          onPointerDown={event => { startPointer.current = { x: event.clientX, y: event.clientY }; dragged.current = false; move(event); }}
           onPointerUp={() => { startPointer.current = undefined; }}
           onPointerCancel={() => { startPointer.current = undefined; leave(); }}>
           {phase === 'error' && !faces ? <button className="inspector-retry" onClick={() => { setPhase('loading'); setRetry(n => n + 1); }}>卡面载入失败，重试</button>
@@ -349,7 +360,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
           </div>
         </div>
         <div className="inspect-bottom inspector-chrome">
-          <p>移动指针赏光 · 再点卡片返回</p>
+          <p>移动指针或拖动卡片赏光 · 点击卡片返回</p>
           <div className="inspector-actions">
             <button className="inspector-text" onClick={toggleLight} aria-pressed={autoLight}>{autoLight ? '停止赏光' : '自动赏光'}</button>
             <button className="inspector-icon" onClick={onExport} aria-label="导出卡牌" title="导出卡牌"><Download size={17}/></button>

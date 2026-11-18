@@ -1,4 +1,6 @@
 import { FLASH_STYLES, getFlashStyle, getStockReflection, plateFor, processKind, processLayerEnabled, pentagon, type CardNode, type CardSide, type Effect, type Project, type Region, type SideName } from './model';
+import { activeImageFill, fillType, gradientPoints, hasFill, hasStroke } from './layerAppearance';
+import { isOpenVector, traceVectorPath } from './vectorPaths';
 
 const imagePromises = new Map<string, Promise<HTMLImageElement>>();
 
@@ -54,6 +56,32 @@ export function imageCrop(image: HTMLImageElement, node: CardNode) {
   return crop;
 }
 
+export function drawImageFill(context: CanvasRenderingContext2D, node: CardNode, image: HTMLImageElement) {
+  const fill = activeImageFill(node);
+  if (!fill) return;
+  if (fill.fit === 'contain') {
+    const scale = Math.min(node.width / image.naturalWidth, node.height / image.naturalHeight);
+    const width = image.naturalWidth * scale, height = image.naturalHeight * scale;
+    context.drawImage(image, (node.width - width) / 2, (node.height - height) / 2, width, height);
+    return;
+  }
+  const crop = imageCrop(image, { ...node, crop: fill.crop });
+  context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, node.width, node.height);
+}
+
+function imageTextPaint(context: CanvasRenderingContext2D, node: CardNode, image: HTMLImageElement) {
+  const transform = context.getTransform();
+  const scale = Math.min(2 * Math.max(Math.hypot(transform.a,transform.b),Math.hypot(transform.c,transform.d)),
+    2600 / Math.max(node.width,node.height));
+  const paint = makeCanvas(node.width * scale, node.height * scale);
+  const local = paint.getContext('2d')!;
+  local.scale(paint.width / node.width, paint.height / node.height);
+  drawImageFill(local, node, image);
+  const pattern = context.createPattern(paint, 'no-repeat');
+  pattern?.setTransform(new DOMMatrix().scale(node.width / paint.width, node.height / paint.height));
+  return pattern;
+}
+
 function textLines(context: CanvasRenderingContext2D, text: string, width: number): string[] {
   const lines: string[] = [];
   for (const paragraph of text.split('\n')) {
@@ -69,86 +97,196 @@ function textLines(context: CanvasRenderingContext2D, text: string, width: numbe
   return lines;
 }
 
-export function drawCardText(context: CanvasRenderingContext2D, node: CardNode) {
+function fillPaint(context: CanvasRenderingContext2D, node: CardNode) {
+  const gradient = node.gradient;
+  if (!gradient || fillType(node) === 'solid') return node.fill || '#fff';
+  const [[x1, y1], [x2, y2]] = gradientPoints(gradient, node.width, node.height);
+  const paint = gradient.kind === 'radial'
+    ? context.createRadialGradient(x1, y1, 0, x1, y1, Math.max(.001, Math.hypot(x2 - x1, y2 - y1)))
+    : context.createLinearGradient(x1, y1, x2 === x1 && y2 === y1 ? x2 + .001 : x2, y2);
+  gradient.stops.forEach(([offset, color]) => paint.addColorStop(offset, color));
+  return paint;
+}
+
+export function cardTextLayout(context: CanvasRenderingContext2D, node: CardNode) {
+  context.save();
   const size = node.fontSize || 24;
-  context.font = `${node.fontStyle || 'normal'} ${size}px ${node.fontFamily || 'Work Sans, PingFang SC, Microsoft YaHei'}, sans-serif`;
-  context.textBaseline = 'top';
-  context.textAlign = node.align === 'center' ? 'center' : node.align === 'right' ? 'right' : 'left';
-  const inset = node.stroke ? Math.min(node.strokeWidth || 0, node.width / 4) : 0;
-  const x = node.align === 'center' ? node.width / 2 : node.align === 'right' ? node.width - inset : inset;
+  const font = `${node.fontStyle || 'normal'} ${size}px ${node.fontFamily || 'Work Sans, PingFang SC, Microsoft YaHei'}, sans-serif`;
+  context.font = font;
+  const inset = hasStroke(node) ? Math.min(node.strokeWidth || 0, node.width / 4) : 0;
   context.letterSpacing = `${node.letterSpacing || 0}px`;
   const lines = textLines(context, node.text || '', node.width - inset * 2);
+  const lineAdvance = size * (node.lineHeight || 1.3);
+  const contentHeight = size + Math.max(0, lines.length - 1) * lineAdvance;
+  const spareHeight = Math.max(0, node.height - contentHeight);
+  const top = node.verticalAlign === 'middle' ? spareHeight / 2 : node.verticalAlign === 'bottom' ? spareHeight : 0;
+  context.textBaseline = 'alphabetic';
+  const alphabetic = context.measureText('Mg').actualBoundingBoxAscent;
+  context.textBaseline = 'top';
+  const baselineOffset = alphabetic - context.measureText('Mg').actualBoundingBoxAscent;
+  context.restore();
+  return { font, size, inset, lines, lineAdvance, contentHeight, top, baselineOffset };
+}
+
+export function drawCardText(context: CanvasRenderingContext2D, node: CardNode, image?: HTMLImageElement) {
+  context.save();
+  const { font, inset, lines, lineAdvance, top } = cardTextLayout(context, node);
+  context.font = font;
+  context.textBaseline = 'top';
+  context.textAlign = node.align === 'center' ? 'center' : node.align === 'right' ? 'right' : 'left';
+  context.letterSpacing = `${node.letterSpacing || 0}px`;
+  const stroke = hasStroke(node);
+  const imageMode = fillType(node) === 'image';
+  const fill = !hasFill(node) ? null : imageMode
+    ? (image ? imageTextPaint(context,node,image) : null) : fillPaint(context,node);
+  const x = node.align === 'center' ? node.width / 2 : node.align === 'right' ? node.width - inset : inset;
   context.beginPath();
   context.rect(0, 0, node.width, node.height);
   context.clip();
-  context.lineJoin = 'round';
+  const alpha = context.globalAlpha;
+  if (fill) context.fillStyle = fill;
+  if (stroke) {
+    context.strokeStyle = node.stroke!;
+    context.lineWidth = node.strokeWidth! * 2;
+    context.lineJoin = 'round';
+  }
   lines.forEach((line, index) => {
-    const y = index * size * (node.lineHeight || 1.3);
-    if (node.stroke && node.strokeWidth) {
-      context.strokeStyle = node.stroke;
-      context.lineWidth = node.strokeWidth * 2;
+    const y = top + index * lineAdvance;
+    if (stroke) {
+      context.globalAlpha = alpha * (node.strokeOpacity ?? 1);
       context.strokeText(line, x, y);
     }
-    context.fillText(line, x, y);
+    if (fill) {
+      context.globalAlpha = alpha * (node.fillOpacity ?? 1);
+      context.fillText(line, x, y);
+    }
   });
+  context.restore();
+}
+
+export function artworkPath(node: CardNode) {
+  const { width, height } = node;
+  const path = new Path2D();
+  if (node.type === 'line') {
+    const [start, end] = node.pathPoints ?? [];
+    if (start && end) {
+      path.moveTo(start.x * width, start.y * height);
+      path.lineTo(end.x * width, end.y * height);
+    }
+  } else if (node.type === 'path') traceVectorPath(path, node.pathPoints ?? [], width, height, node.pathClosed);
+  else if (node.type === 'ellipse') path.ellipse(width / 2, height / 2, width / 2, height / 2, 0, 0, Math.PI * 2);
+  else if (node.type === 'polygon') {
+    const points = node.polygon?.map((value, i) => value * (i % 2 ? height : width)) || pentagon(width, height);
+    path.moveTo(points[0], points[1]);
+    for (let i = 2; i < points.length; i += 2) path.lineTo(points[i], points[i + 1]);
+    path.closePath();
+  } else if (node.cornerRadius) path.roundRect(0, 0, width, height, Math.min(node.cornerRadius, width / 2, height / 2));
+  else path.rect(0, 0, width, height);
+  return path;
+}
+
+function drawStroke(context: CanvasRenderingContext2D, node: CardNode, path: Path2D) {
+  if (!hasStroke(node)) return;
+  const width = node.strokeWidth!;
+  const align = isOpenVector(node) ? 'center' : node.strokeAlign ?? 'center';
+  context.save();
+  if (align === 'inside') context.clip(path);
+  if (align === 'outside') {
+    const inverse = new Path2D();
+    const margin = width * 2;
+    inverse.rect(-margin, -margin, node.width + margin * 2, node.height + margin * 2);
+    inverse.addPath(path);
+    context.clip(inverse, 'evenodd');
+  }
+  context.globalAlpha *= node.strokeOpacity ?? 1;
+  context.strokeStyle = node.stroke!;
+  context.lineWidth = align === 'center' ? width : width * 2;
+  context.lineJoin = 'round';
+  if (node.strokeStyle === 'dashed') context.setLineDash([width * 4, width * 2.5]);
+  if (node.strokeStyle === 'dotted') {
+    context.lineCap = 'round';
+    context.setLineDash([0, width * 3]);
+  }
+  context.stroke(path);
+  context.restore();
+}
+
+function paintArtworkContent(context: CanvasRenderingContext2D, node: CardNode, image?: HTMLImageElement) {
+  if (node.type === 'empty') return;
+  if (node.type === 'text') { drawCardText(context, node, image); return; }
+  const path = artworkPath(node);
+  if (activeImageFill(node)) {
+    if (image && !node.fillHidden) {
+      context.save();
+      context.globalAlpha *= node.fillOpacity ?? 1;
+      context.clip(path);
+      drawImageFill(context, node, image);
+      context.restore();
+    }
+  } else if (hasFill(node)) {
+    context.save();
+    context.globalAlpha *= node.fillOpacity ?? 1;
+    context.fillStyle = fillPaint(context, node);
+    context.fill(path);
+    context.restore();
+  }
+  drawStroke(context, node, path);
+}
+
+export function applyLayerFlip(context: CanvasRenderingContext2D, node: CardNode) {
+  const { flipX, flipY, width, height } = node;
+  if (flipX || flipY) context.transform(flipX ? -1 : 1, 0, 0, flipY ? -1 : 1, flipX ? width : 0, flipY ? height : 0);
+}
+
+function paintArtwork(context: CanvasRenderingContext2D, node: CardNode, image?: HTMLImageElement) {
+  if (!node.flipX && !node.flipY) {
+    paintArtworkContent(context, node, image);
+    return;
+  }
+  // The layer's local center stays fixed; rotation and page-space clips are outside this reflection.
+  context.save();
+  applyLayerFlip(context, node);
+  paintArtworkContent(context, node, image);
+  context.restore();
+}
+
+const artworkBuffers = new WeakMap<CanvasRenderingContext2D, HTMLCanvasElement>();
+
+export function drawArtwork(context: CanvasRenderingContext2D, node: CardNode, image?: HTMLImageElement) {
+  const combinesFillAndStroke = hasStroke(node) && hasFill(node);
+  if (!combinesFillAndStroke || (context.globalAlpha === 1 && context.globalCompositeOperation === 'source-over')) {
+    paintArtwork(context, node, image);
+    return;
+  }
+  // Apply layer opacity and blending to the fill and outline together.
+  let buffer = artworkBuffers.get(context);
+  if (!buffer || buffer.width !== context.canvas.width || buffer.height !== context.canvas.height) {
+    buffer = makeCanvas(context.canvas.width, context.canvas.height);
+    artworkBuffers.set(context, buffer);
+  }
+  const local = buffer.getContext('2d')!;
+  local.resetTransform();
+  local.clearRect(0, 0, buffer.width, buffer.height);
+  local.setTransform(context.getTransform());
+  paintArtwork(local, node, image);
+  context.save();
+  context.resetTransform();
+  context.drawImage(buffer, 0, 0);
+  context.restore();
 }
 
 export async function drawNode(context: CanvasRenderingContext2D, node: CardNode, mask = false) {
-  if (!node.visible) return;
+  if (!node.visible || node.type === 'empty') return;
+  const source = activeImageFill(node)?.src;
+  const image = source ? await loadImage(source) : undefined;
   context.save();
   context.translate(node.x, node.y);
   context.rotate(node.rotation * Math.PI / 180);
   context.globalAlpha = mask ? 1 : node.opacity;
   if (!mask && node.blend) context.globalCompositeOperation = node.blend as GlobalCompositeOperation;
-  context.fillStyle = mask ? '#ffffff' : node.fill || '#ffffff';
-  context.strokeStyle = mask ? '#ffffff' : node.stroke || 'transparent';
-  context.lineWidth = node.strokeWidth || 0;
-  if (node.type === 'image' && node.src) {
-    const image = await loadImage(node.src);
-    const crop = imageCrop(image, node);
-    if (node.cornerRadius) {
-      context.beginPath();
-      context.roundRect(0, 0, node.width, node.height, node.cornerRadius);
-      context.clip();
-    }
-    context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, node.width, node.height);
-  } else if (node.type === 'text') {
-    drawCardText(context, mask && node.stroke ? { ...node, stroke: '#ffffff' } : node);
-  } else {
-    drawShape(context, node, mask);
-  }
+  drawArtwork(context, node, image);
   context.restore();
 }
-
-export function drawShape(context: CanvasRenderingContext2D, node: CardNode, mask = false) {
-  const { width, height } = node;
-  context.fillStyle = mask ? '#fff' : node.fill;
-  if (node.gradient && !mask) {
-    const angle = node.gradient.angle * Math.PI / 180;
-    const dx = Math.cos(angle), dy = Math.sin(angle);
-    const length = (Math.abs(width * dx) + Math.abs(height * dy)) / 2;
-    const fill = context.createLinearGradient(width/2-dx*length, height/2-dy*length, width/2+dx*length, height/2+dy*length);
-    node.gradient.stops.forEach(([offset, color]) => fill.addColorStop(offset, color));
-    context.fillStyle = fill;
-  }
-  context.beginPath();
-  if (node.type === 'ellipse') context.ellipse(width / 2, height / 2, width / 2, height / 2, 0, 0, Math.PI * 2);
-  else if (node.type === 'polygon') {
-    const points = node.polygon?.map((value, i) => value * (i % 2 ? height : width)) || pentagon(width, height);
-    context.moveTo(points[0], points[1]);
-    for (let i = 2; i < points.length; i += 2) context.lineTo(points[i], points[i + 1]);
-    context.closePath();
-  } else if (node.cornerRadius) context.roundRect(0, 0, width, height, node.cornerRadius);
-  else context.rect(0, 0, width, height);
-  if (node.fill !== 'transparent' || node.gradient) context.fill();
-  if (node.stroke && node.strokeWidth) {
-    context.strokeStyle = mask ? '#fff' : node.stroke;
-    context.lineWidth = node.strokeWidth;
-    context.lineJoin = 'round';
-    context.stroke();
-  }
-}
-
 export async function renderRegionMask(project: Project, side: CardSide, region: Region, scale = 1, visited = new Set<string>(), cached = new Map<string, HTMLCanvasElement>()): Promise<HTMLCanvasElement> {
   const existing = cached.get(region.id);
   if (existing) return existing;
@@ -167,7 +305,8 @@ export async function renderRegionMask(project: Project, side: CardSide, region:
     const linked = side.nodes.find(item => item.id === region.nodeId);
     const node = region.binding === 'fixed' ? region.snapshot || linked : linked;
     if (node) {
-      await drawNode(context, region.binding === 'fixed' && region.bounds ? { ...node, ...region.bounds } : node, true);
+      const shape = region.binding === 'fixed' && region.bounds ? { ...node, ...region.bounds } : node;
+      await drawNode(context, region.maskSource ? { ...shape, visible: true } : shape, true);
       const clip = side.regions.find(item => item.id === node.clipRegionId);
       const branch = new Set(visited).add(region.id);
       if (clip && !branch.has(clip.id) && branch.size < 16) {
@@ -419,20 +558,22 @@ async function renderMaterial(project: Project, side: CardSide, scale: number, l
   return canvas;
 }
 
-export async function renderEffects(project: Project, side: CardSide, scale = 1, light = 0, material = true) {
+export async function renderEffects(project: Project, side: CardSide, scale = 1, light = 0, material = true, localFlash = true) {
   const width = project.widthMm * 10;
   const height = project.heightMm * 10;
   const output = makeCanvas(width * scale, height * scale);
   const outputContext = output.getContext('2d')!;
   if (material) outputContext.drawImage(await renderMaterial(project, side, scale, light), 0, 0);
   for (const effect of side.effects) {
-    if (!effect.visible || effect.opacity <= 0 || processKind(effect) === 'white') continue;
+    const kind = processKind(effect);
+    if (!effect.visible || effect.opacity <= 0 || kind === 'white' || kind === 'primer' || kind === 'spot' ||
+        (kind === 'reflection' && !localFlash)) continue;
     const mask = await renderEffectMask(project, side, effect, scale);
     const layer = makeCanvas(output.width, output.height);
     const context = layer.getContext('2d')!;
     context.scale(scale, scale);
-    if (processKind(effect) === 'reflection') await paintLocalFlash(project, context, effect, width, height, light);
-    else paintFinish(context, effect, width, height, light);
+    if (kind === 'reflection') await paintLocalFlash(project, context, effect, width, height, light);
+    else paintFinish(context, effect, width, height, kind === 'deboss' ? light + 180 : light);
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.globalCompositeOperation = 'destination-in';
     context.drawImage(mask, 0, 0);
@@ -450,6 +591,8 @@ export interface RenderCardOptions {
   scale?: number; effects?: boolean; plate?: string; layerId?: string; transparentGround?: boolean; bleed?: boolean; light?: number;
   /** Preview substrate simulation; disable when baking digital effects for print. */
   material?: boolean;
+  /** Disable when local flash is rendered as separate, interactive layers. */
+  localFlash?: boolean;
 }
 
 export async function renderCard(project: Project, sideName: SideName, options: RenderCardOptions = {}) {
@@ -464,7 +607,8 @@ export async function renderCard(project: Project, sideName: SideName, options: 
   context.scale(scale, scale);
   const ground = side.nodes.find(n => n.type === 'rect' && n.visible && n.opacity === 1 &&
     n.rotation === 0 && n.x <= 0 && n.y <= 0 && n.x+n.width >= width && n.y+n.height >= height &&
-    n.fill !== 'transparent' && !n.clipRegionId && !n.gradient);
+    hasFill(n) && fillType(n) === 'solid' && /^(#[a-f\d]{3}|#[a-f\d]{6})$/i.test(n.fill) &&
+    (n.fillOpacity ?? 1) === 1 && !n.clipRegionId);
   context.fillStyle = options.plate ? '#ffffff' : ground?.fill || '#ffffff';
   if (!options.transparentGround) context.fillRect(0, 0, width + bleed * 2, height + bleed * 2);
   context.translate(bleed, bleed);
@@ -489,9 +633,9 @@ export async function renderCard(project: Project, sideName: SideName, options: 
   context.clip();
   const cached = new Map<string, HTMLCanvasElement>();
   for (const node of side.nodes) {
+    if (!node.visible || node.type === 'empty') continue;
     const clip = node.clipRegionId && side.regions.find(region => region.id === node.clipRegionId);
     if (!clip) { await drawNode(context, node); continue; }
-    if (!node.visible) continue;
     const area = await renderRegionMask(project, side, clip, scale, new Set(), cached);
     const clipped = makeCanvas(area.width, area.height);
     const target = clipped.getContext('2d')!;
@@ -505,7 +649,7 @@ export async function renderCard(project: Project, sideName: SideName, options: 
     context.globalCompositeOperation = 'source-over';
   }
   if (options.effects !== false) {
-    const effects = await renderEffects(project, side, scale, options.light || 0, options.material !== false);
+    const effects = await renderEffects(project, side, scale, options.light || 0, options.material !== false, options.localFlash !== false);
     context.drawImage(effects, 0, 0, width, height);
   }
   context.restore();

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CardNode, ImageCrop } from './model';
-import { coverCrop, imageCrop, loadImage } from './render';
+import { applyLayerFlip, coverCrop, drawImageFill, imageCrop, loadImage } from './render';
+import { activeImageFill } from './layerAppearance';
 import './crop-editor.css';
 
 type Frame = Omit<ImageCrop, 'space'>;
@@ -17,34 +18,32 @@ function reposition(frame: Frame, x: number, y: number): Frame {
 
 export function CroppedImage({ node }: { node: CardNode }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const source = activeImageFill(node)?.src;
   useEffect(() => {
     const target = canvas.current;
-    if (!node.src || !target) return;
+    if (!source || !target) return;
     let current = true;
-    loadImage(node.src).then(image => {
+    loadImage(source).then(image => {
       if (!current) return;
-      const crop = imageCrop(image, node);
       const scale = Math.min(360 / node.width, 200 / node.height);
       target.width = Math.max(1, Math.round(node.width * scale));
       target.height = Math.max(1, Math.round(node.height * scale));
       const context = target.getContext('2d');
       if (!context) return;
-      if (node.cornerRadius) {
-        context.beginPath();
-        context.roundRect(0, 0, target.width, target.height, node.cornerRadius * scale);
-        context.clip();
-      }
-      context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, target.width, target.height);
+      context.scale(target.width / node.width, target.height / node.height);
+      applyLayerFlip(context, node);
+      drawImageFill(context, node, image);
     }).catch(() => target.getContext('2d')?.clearRect(0, 0, target.width, target.height));
     return () => { current = false; };
-  }, [node]);
+  }, [source,node.width,node.height,node.crop,node.imageFill,node.flipX,node.flipY]);
   return <canvas ref={canvas} role="img" aria-label={`${node.name}的裁切预览`} />;
 }
 
-export default function CropEditor({ node, onCancel, onApply }: {
+export default function CropEditor({ node, onCancel, onApply, preserveCrop }: {
   node: CardNode;
   onCancel: () => void;
   onApply: (crop: ImageCrop) => void;
+  preserveCrop?: { checked: boolean; onChange: (checked: boolean) => void };
 }) {
   const [source, setSource] = useState<{ width: number; height: number; cover: Frame }>();
   const [frame, setFrame] = useState<Frame>();
@@ -61,7 +60,7 @@ export default function CropEditor({ node, onCancel, onApply }: {
         height: clamp(original.height, .001, 1) }, original.x, original.y));
     }).catch(() => { if (current) setFailed(true); });
     return () => { current = false; };
-  }, [node]);
+  }, [node.src,node.width,node.height,node.crop]);
 
   if (!source || !frame) return <p role="status">{failed ? '图片无法读取，请替换源图片后重试。' : '正在读取原图…'}</p>;
   const ratio = Math.min(1, 590 / source.width, 410 / source.height);
@@ -97,6 +96,10 @@ export default function CropEditor({ node, onCancel, onApply }: {
     </div>
     <label className="range-field"><span>放大裁切 <b>{zoom.toFixed(2)}×</b></span><input type="range" aria-label="放大裁切"
       min={1} max={Math.max(6, Math.ceil(zoom))} step="0.01" value={Math.max(1, zoom)} onChange={event => resize(+event.target.value)} /></label>
+    {preserveCrop && <label className="check-field">
+      <input type="checkbox" checked={preserveCrop.checked} onChange={event => preserveCrop.onChange(event.target.checked)}/>
+      替换图片时沿用裁切
+    </label>}
     <div className="crop-actions">
       <button className="button" onClick={() => setFrame(source.cover)}>重置</button>
       <button className="button" onClick={onCancel}>取消</button>
