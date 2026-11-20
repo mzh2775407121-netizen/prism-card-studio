@@ -3,8 +3,9 @@ import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, X } from 'lucide-react';
 import { loadInspectorFace, type InspectorFace } from './albumInspectorAssets';
 import { getCardCornerRadiusMm, type Project, type SideName } from './model';
+import { isTransparentStock } from './stockMaterials';
+import { INSPECTOR_BACKGROUND, INSPECTOR_PERSPECTIVE, paintInspectorFace, type InspectorLight, type StillView } from './stillExport';
 import './album-materials.css';
-import './album-local-flash.css';
 import './album-preview.css';
 
 // Motion ported from 藏光's CardInspector.jsx and HoloCard.jsx.
@@ -30,37 +31,17 @@ const clamp = (n: number) => Math.max(0, Math.min(100, n));
 const rest: Light = { x: 50, y: 50, o: 0 };
 const openedCards = new Set<string>();
 
-function setLight(element: HTMLElement, x: number, y: number, opacity: number) {
-  x = Math.round(x * 4) / 4;
-  y = Math.round(y * 4) / 4;
-  const values = {
-    '--pointer-x': x + '%',
-    '--pointer-y': y + '%',
-    '--pointer-from-center': Math.min(1, Math.hypot(x - 50, y - 50) / 50),
-    '--pointer-from-top': y / 100,
-    '--pointer-from-left': x / 100,
-    '--background-x': (37 + x * .26) + '%',
-    '--background-y': (33 + y * .34) + '%',
-    '--card-opacity': Math.round(opacity * 100) / 100,
-    '--flash-sweep': (x * .72 + y * .28) + '%',
-    '--flash-tilt': ((x - 50) * .58 + (y - 50) * .31) + 'deg',
-  };
-  for (const [key, value] of Object.entries(values)) {
-    if (element.style.getPropertyValue(key) !== String(value)) element.style.setProperty(key, String(value));
-  }
+function frameLight(x: number, y: number, opacity: number): InspectorLight {
+  return { x: Math.round(clamp(x) * 4) / 4, y: Math.round(clamp(y) * 4) / 4,
+    opacity: Math.round(clamp(opacity * 100)) / 100 };
 }
 
-function CardFace({ face, artwork, visible }: { face: SideName; artwork: InspectorFace; visible: boolean }) {
+function CardFace({ face, canvas, visible, transparent }: {
+  face: SideName; canvas: RefObject<HTMLCanvasElement | null>; visible: boolean; transparent: boolean;
+}) {
   return <div className={'card__front inspector-card-face ' + face} aria-hidden={!visible}
-    style={{ '--glare-mask': 'url("' + artwork.glare + '")' } as CSSProperties}>
-    <img src={artwork.artwork} alt={face === 'front' ? '卡片正面' : '卡片背面'} draggable={false}/>
-    {artwork.flashes.map(flash => <div key={flash.id} className="inspector-local-flash" data-flash-style={flash.style}
-      style={{
-        '--flash-mask': 'url("' + flash.mask + '")',
-        '--flash-angle': flash.angle + 'deg',
-        '--flash-opacity': flash.opacity,
-      } as CSSProperties}/>)}
-    <div className="card__glare"/>
+    style={transparent ? { backgroundColor: 'transparent' } : undefined}>
+    <canvas ref={canvas} role="img" aria-label={face === 'front' ? '卡片正面' : '卡片背面'}/>
   </div>;
 }
 
@@ -70,17 +51,21 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
   cardBoundsRef: RefObject<HTMLDivElement | null>;
   material?: string;
   onClose: () => void;
-  onExport: () => void;
+  onExport: (view: StillView) => void;
 }) {
+  const initialFace = project.singleSided ? 'front' : initialSide;
+  const transparent = isTransparentStock(project.material);
   const [phase, setPhase] = useState<Phase>('loading');
-  const [side, setSide] = useState(initialSide);
+  const [side, setSide] = useState(initialFace);
   const [faces, setFaces] = useState<Record<SideName, InspectorFace>>();
   const [retry, setRetry] = useState(0);
-  const [autoLight, setAutoLight] = useState(false);
+  const [flipping, setFlipping] = useState(false);
   const dialog = useRef<HTMLDivElement>(null);
   const arena = useRef<HTMLDivElement>(null);
   const flight = useRef<HTMLDivElement>(null);
   const rotor = useRef<HTMLButtonElement>(null);
+  const frontCanvas = useRef<HTMLCanvasElement>(null);
+  const backCanvas = useRef<HTMLCanvasElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const model = useRef<{
     x: Spring; y: Spring; scale: Spring; spin: Spring; rx: Spring; ry: Spring;
@@ -94,7 +79,8 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
   const frame = useRef(0);
   const previousTick = useRef(0);
   const lastLight = useRef(0);
-  const motion = useRef(false);
+  const painted = useRef<{ side: SideName; light: InspectorLight }>(undefined);
+  const turningSide = useRef(false);
   const reduced = useRef(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const completed = useRef(false);
   const callback = useRef(onClose);
@@ -129,9 +115,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     const age = now - m.started;
     const turning = Math.abs(m.spin.target - m.spin.value) > .3;
     const sweeping = !m.closing && !reduced.current && (turning || (m.reveal && age < 1000));
-    const target = m.closing ? rest : motion.current
-      ? { x: 50 + Math.sin(now / 1900) * 39, y: 50 + Math.cos(now / 2600) * 36, o: 1 }
-      : pointer.current;
+    const target = m.closing ? rest : pointer.current;
     const spinRadians = m.spin.value * Math.PI / 180;
     m.gx.target = sweeping ? 50 + Math.sin(spinRadians) * 44 : target.x;
     m.gy.target = sweeping ? 50 - Math.sin(spinRadians * 2) * 22 : target.y;
@@ -153,9 +137,22 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     const settled = Math.abs(m.x.target - m.x.value) < .5 && Math.abs(m.y.target - m.y.value) < .5 &&
       Math.abs(m.scale.target - m.scale.value) < .002 && Math.abs(m.spin.target - m.spin.value) < .3;
     const lightSettled = [m.gx, m.gy, m.opacity, m.rx, m.ry].every(axis => Math.abs(axis.target - axis.value) < .012);
-    if (now - lastLight.current > 1000 / 30 || (settled && lightSettled)) {
-      setLight(card, m.gx.value, m.gy.value, m.opacity.value);
+    const visibleSide = Math.cos((m.spin.value + m.rx.value) * Math.PI / 180) >= 0 ? 'front' : 'back';
+    if (painted.current?.side !== visibleSide || now - lastLight.current > 1000 / 30 || (settled && lightSettled)) {
+      const light = frameLight(m.gx.value, m.gy.value, m.opacity.value);
+      const face = faces?.[visibleSide];
+      const targetCanvas = visibleSide === 'front' ? frontCanvas.current : backCanvas.current;
+      const previous = painted.current;
+      if (face && targetCanvas && (previous?.side !== visibleSide || previous.light.x !== light.x ||
+        previous.light.y !== light.y || previous.light.opacity !== light.opacity)) {
+        paintInspectorFace(targetCanvas, face, light);
+        painted.current = { side: visibleSide, light };
+      }
       lastLight.current = now;
+    }
+    if (settled && turningSide.current) {
+      turningSide.current = false;
+      setFlipping(false);
     }
     if (m.closing) {
       if (m.fade) card.style.opacity = String(Math.max(0, 1 - age / 240));
@@ -165,7 +162,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
         return;
       }
     } else if (settled || age > 1800) setPhase('open');
-    if (!settled || !lightSettled || sweeping || motion.current) frame.current = requestAnimationFrame(tick);
+    if (!settled || !lightSettled || sweeping) frame.current = requestAnimationFrame(tick);
   }
 
   function animate() {
@@ -186,21 +183,22 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     m.x.target = pose.x;
     m.y.target = pose.y;
     m.scale.target = pose.scale;
-    const facing = initialSide === 'back' ? 180 : 0;
+    const facing = initialFace === 'back' ? 180 : 0;
     m.spin.target = facing + Math.round((m.spin.value - facing) / 360) * 360;
     m.rx.target = m.ry.target = 0;
     m.closing = true;
     m.started = performance.now();
     m.fade = !pose.hasSource;
     pointer.current = { ...rest };
-    motion.current = false;
     setPhase('closing');
     animate();
   }
 
   useEffect(() => {
     let live = true;
-    Promise.all([loadInspectorFace(project, 'front'), loadInspectorFace(project, 'back')])
+    const frontFace = loadInspectorFace(project, 'front');
+    const backFace = project.singleSided ? frontFace : loadInspectorFace(project, 'back');
+    Promise.all([frontFace, backFace])
       .then(([front, back]) => {
         if (live) setFaces({ front, back });
       }).catch(() => { if (live) setPhase('error'); });
@@ -210,6 +208,10 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
   useLayoutEffect(() => {
     const target = flight.current;
     if (!faces || !target) return;
+    const light = model.current ? frameLight(model.current.gx.value, model.current.gy.value, model.current.opacity.value) : frameLight(50, 50, .8);
+    if (frontCanvas.current) paintInspectorFace(frontCanvas.current, faces.front, light);
+    if (backCanvas.current) paintInspectorFace(backCanvas.current, faces.back, light);
+    painted.current = { side: initialFace, light };
     if (model.current) {
       if (phase === 'error') setPhase('open');
       return;
@@ -218,7 +220,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     const fromCanvas = pose.hasSource && !reduced.current;
     const first = !openedCards.has(project.id) && !reduced.current;
     openedCards.add(project.id);
-    const facing = initialSide === 'back' ? 180 : 0;
+    const facing = initialFace === 'back' ? 180 : 0;
     const m = {
       x: spring(fromCanvas ? pose.x : 0), y: spring(fromCanvas ? pose.y : 0),
       scale: spring(fromCanvas ? pose.scale : 1), spin: spring(facing),
@@ -238,11 +240,13 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     }
     setPhase(reduced.current ? 'open' : 'entering');
     animate();
-  }, [faces, initialSide, project.id, cardBoundsRef, returnPose]);
+  }, [faces, initialFace, project.id, cardBoundsRef, returnPose]);
 
   function flip(direction: number) {
     const m = model.current;
-    if (!m || phase !== 'open' || m.closing) return;
+    if (project.singleSided || !m || phase !== 'open' || m.closing || turningSide.current) return;
+    turningSide.current = true;
+    setFlipping(true);
     setSide(previous => previous === 'front' ? 'back' : 'front');
     m.spin.target += 180 * direction;
     m.reveal = false;
@@ -296,7 +300,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
 
   function move(event: PointerEvent<HTMLDivElement>) {
     if (startPointer.current && Math.hypot(event.clientX - startPointer.current.x, event.clientY - startPointer.current.y) > 6) dragged.current = true;
-    if (motion.current || model.current?.closing || !flight.current) return;
+    if (model.current?.closing || !flight.current) return;
     clearTimeout(leaveTimer.current);
     const rect = flight.current.getBoundingClientRect();
     pointer.current = {
@@ -311,24 +315,28 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
     leaveTimer.current = window.setTimeout(() => { pointer.current = { ...rest }; animate(); }, 500);
   }
 
-  function toggleLight() {
-    motion.current = !motion.current;
-    setAutoLight(motion.current);
-    animate();
+  function exportView() {
+    const m = model.current;
+    if (!m || turningSide.current) return;
+    onExport({ side, light: painted.current?.light ?? frameLight(m.gx.value, m.gy.value, m.opacity.value),
+      yaw: m.spin.value - m.spin.target + m.rx.value, pitch: m.ry.value * (side === 'front' ? 1 : -1),
+      perspective: INSPECTOR_PERSPECTIVE / Math.max(1, flight.current?.offsetHeight ?? 1),
+      background: INSPECTOR_BACKGROUND });
   }
 
   const radius = getCardCornerRadiusMm(project);
   const previewVariables = {
     '--card-radius': `${radius / project.widthMm * 100}% / ${radius / project.heightMm * 100}%`,
     '--card-aspect': project.widthMm / project.heightMm,
+    '--preview-perspective': INSPECTOR_PERSPECTIVE + 'px',
   } as CSSProperties;
   return createPortal(
-    <div className="prism-card-inspector inspector-backdrop source-popover" data-phase={phase} onClick={event => {
+    <div className="prism-card-inspector inspector-backdrop source-popover" data-phase={phase}
+      style={{ '--preview-background': INSPECTOR_BACKGROUND } as CSSProperties} onClick={event => {
       if (event.currentTarget === event.target) dismiss();
     }}>
       <div ref={dialog} className="inspector" data-phase={phase} style={previewVariables} role="dialog" aria-modal="true" aria-labelledby="inspector-card-title">
         <div className="inspector-top inspector-chrome">
-          <span>近看收藏</span>
           <button ref={close} className="inspector-icon close-button" onClick={dismiss} aria-label="返回编辑"><X size={19}/></button>
         </div>
         <div ref={arena} className="inspect-arena" onPointerMove={move} onPointerLeave={leave}
@@ -344,8 +352,8 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
                     if (event.detail && dragged.current) { dragged.current = false; return; }
                     dismiss();
                   }}>
-                    <CardFace face="back" artwork={faces.back} visible={side === 'back'}/>
-                    <CardFace face="front" artwork={faces.front} visible={side === 'front'}/>
+                    <CardFace face="back" canvas={backCanvas} visible={side === 'back'} transparent={transparent}/>
+                    <CardFace face="front" canvas={frontCanvas} visible={side === 'front'} transparent={transparent}/>
                   </button>
                 </div>
               </div>
@@ -354,17 +362,14 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
         <div className="inspect-info inspector-chrome">
           <div><h2 id="inspector-card-title">{project.name}</h2>
             <p>{material} · {project.widthMm} × {project.heightMm} mm · {side === 'front' ? '正面' : '背面'}</p></div>
-          <div className="inspect-step">
-            <button className="inspector-icon" onClick={() => flip(-1)} disabled={phase !== 'open'} aria-label="向左翻面"><ChevronLeft size={21}/></button>
-            <button className="inspector-icon" onClick={() => flip(1)} disabled={phase !== 'open'} aria-label="向右翻面"><ChevronRight size={21}/></button>
-          </div>
+          {!project.singleSided && <div className="inspect-step">
+            <button className="inspector-icon" onClick={() => flip(-1)} disabled={phase !== 'open' || flipping} aria-label="向左翻面"><ChevronLeft size={21}/></button>
+            <button className="inspector-icon" onClick={() => flip(1)} disabled={phase !== 'open' || flipping} aria-label="向右翻面"><ChevronRight size={21}/></button>
+          </div>}
         </div>
         <div className="inspect-bottom inspector-chrome">
-          <p>移动指针或拖动卡片赏光 · 点击卡片返回</p>
-          <div className="inspector-actions">
-            <button className="inspector-text" onClick={toggleLight} aria-pressed={autoLight}>{autoLight ? '停止赏光' : '自动赏光'}</button>
-            <button className="inspector-icon" onClick={onExport} aria-label="导出卡牌" title="导出卡牌"><Download size={17}/></button>
-          </div>
+          <p>材质效果示意</p>
+          <button className="inspector-icon" onClick={exportView} disabled={phase !== 'open' || flipping} aria-label="导出卡牌" title="导出当前视角"><Download size={17}/></button>
         </div>
         {phase === 'error' && faces && <p className="inspector-loading" role="status">当前样式加载失败。<button onClick={() => setRetry(n => n + 1)}>重试</button></p>}
       </div>

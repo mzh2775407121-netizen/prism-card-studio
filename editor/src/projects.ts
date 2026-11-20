@@ -1,5 +1,6 @@
-import type { Project } from './model';
+import { hydrateProject, type Project, type StoredProjectDocument } from './model';
 import { listLegacyProjects } from './io';
+import { browserRuntime } from './runtime';
 
 export interface ProjectSummary {
   id: string;
@@ -9,6 +10,7 @@ export interface ProjectSummary {
   updatedAt: number;
   archivedAt: number | null;
   revision: number;
+  cardCount: number;
 }
 
 export interface StoredProject extends ProjectSummary {
@@ -38,18 +40,31 @@ async function request<T>(path = '', body?: object): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export const listProjects = () => request<ProjectSummary[]>();
-export const readProject = (id: string) => request<StoredProject>('/' + encodeURIComponent(id));
+export const listProjects = () => browserRuntime
+  ? import('./browserProjects').then(store => store.listBrowserProjects())
+  : request<ProjectSummary[]>().then(items => items.map(item => ({ ...item, cardCount: item.cardCount ?? 1 })));
+export const readProject = (id: string) => browserRuntime
+  ? import('./browserProjects').then(store => store.readBrowserProject(id))
+  : request<ProjectSummary & { project: Project | StoredProjectDocument }>('/' + encodeURIComponent(id)).then(record => {
+    const project = hydrateProject(record.project);
+    return { ...record, project, cardCount: record.cardCount ?? 1 + (project.additionalCards?.length ?? 0) };
+  });
 export const writeProject = (project: Project, revision: number, mutation: string) =>
-  request<ProjectSummary>('/' + encodeURIComponent(project.id), { project, revision, mutation });
+  browserRuntime
+    ? import('./browserProjects').then(store => store.writeBrowserProject(project, revision, mutation))
+    : request<ProjectSummary>('/' + encodeURIComponent(project.id), { project, revision, mutation })
+      .then(record => ({ ...record, cardCount: record.cardCount ?? 1 + (project.additionalCards?.length ?? 0) }));
 
 export async function createStoredProject(project: Project): Promise<StoredProject> {
   const summary = await writeProject(project, 0, project.id);
-  return { ...summary, project: { ...project, updatedAt: summary.updatedAt } };
+  return { ...summary, project: hydrateProject({ ...project, updatedAt: summary.updatedAt }) };
 }
 
 export const archiveProject = (project: ProjectSummary, archived: boolean) =>
-  request<ProjectSummary>('/' + encodeURIComponent(project.id) + '/archive', { revision: project.revision, archived });
+  browserRuntime
+    ? import('./browserProjects').then(store => store.archiveBrowserProject(project, archived))
+    : request<ProjectSummary>('/' + encodeURIComponent(project.id) + '/archive', { revision: project.revision, archived })
+      .then(record => ({ ...record, cardCount: record.cardCount ?? project.cardCount }));
 
 export async function openLibrary() {
   const items = await listProjects();

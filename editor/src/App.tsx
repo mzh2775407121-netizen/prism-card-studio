@@ -4,28 +4,36 @@ import JSZip from 'jszip';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { ClipboardListIcon } from '@hugeicons/core-free-icons';
 import EditorCanvas, { ZOOM_STEP, type CanvasNavigation, type CreatedVector, type EditorTool } from './EditorCanvas';
-import { PrintGuideLegend, PrintCornerPreview, PRINT_SAFE_MARGIN_MM, isOutsidePrintSafeArea } from './PrintGuides';
+import { PrintGuideLegend, PrintCornerPreview, getPrintSafeMarginMm } from './PrintGuides';
 import CropEditor from './CropEditor';
-import { STOCKS, StockPicker, defaultStockReflection, LayerMaskField, LayerTypeField, MaskContentEditor, imageMaskNode, type MaskShape } from './ProductionControls';
+import { StockPicker, StockFinishControls, StockFinishMatchForm, LayerMaskField, LayerTypeField, MaskContentEditor, imageMaskNode, type MaskShape } from './ProductionControls';
+import { STOCKS, changeStockSpec, effectiveStockSpec, resetStockFinishMatch, stockPreset, stockKeys, stockDelivery } from './stockMaterials';
 import { LAYER_KINDS, classifyLayer, createArtwork, makeProcess, type LayerKind } from './layers';
 import { LayerAppearanceEditor, LayerGeometry, StyleAction, StyleSection } from './LayerStylePanel';
 import InspectorMenu from './InspectorMenu';
 import LayerTypography from './LayerTypography';
 import { activeImageFill, copyAppearance, pasteAppearance, type LayerAppearance } from './layerAppearance';
 import AlbumPreview from './AlbumPreview';
+import { renderStill, type StillView } from './stillExport';
 import ProductionPlanEditor from './ProductionPlanEditor';
+import { PlateProof } from './PlateProof';
+import { AutoLayoutProperties, LayoutItemProperties } from './AutoLayoutProperties';
+import { applyAutoLayout, createAutoLayout, layoutParent, scaleAutoLayout, setAutoLayout } from './autoLayout';
 import ProjectWorkbench from './ProjectWorkbench';
-import { DIE_SHAPES, PLATE_LABELS, SPOT_NAMES, productionSteps, reflectionCount, type ProductionStep } from './production';
+import { DIE_SHAPES, PLATE_LABELS, productionSteps, reflectionCount, type ProductionStep } from './production';
+import { isRasterProfile, printSpotNames, profileOutputScope, projectPrintProfile, type TechnicalPrintProfile } from './printProfiles';
+import { exportFactoryRaster, orientPrintCanvas, printPreflight, type PreflightIssue, type PreflightTarget } from './printPreflight';
 import { PRINT_CHANNELS } from './model';
-import { createProject, uid, TEMPLATE_NAMES, PROCESS_LABELS, STOCK_REFLECTIONS, FLASH_STYLES, getFlashStyle, getStockReflection, getCardCornerRadiusMm, plateFor, processKind, processLayerEnabled, type Project, type SideName, type CardSide, type CardNode, type Region, type Effect, type ProcessKind, type EffectType, type TemplateName, type ImageCrop, type StockReflection, type FlashStyle } from './model';
+import { createProject, copyProject, uid, TEMPLATE_NAMES, MAX_PROJECT_NOTE_LENGTH, PROCESS_LABELS, STOCK_REFLECTIONS, FLASH_STYLES, getFlashStyle, getStockReflection, getStockFinish, getCardCornerRadiusMm, plateFor, processKind, effectInProduction, type Project, type SideName, type CardSide, type CardNode, type Region, type Effect, type ProcessKind, type EffectType, type ImageCrop, type StockSpec, type StockFinish, type FlashStyle } from './model';
 import { renderCard } from './render';
-import { exportProject, importProject, downloadBlob, readImage } from './io';
+import { buildProjectArchive, exportProject, importProject, downloadBlob, readImage } from './io';
 import { archiveProject, createStoredProject, listProjects, openLibrary, ProjectRequestError, readProject, type ProjectSummary, type StoredProject } from './projects';
 import { useProjectSave } from './useProjectSave';
 import { LayerContextMenu, type LayerCommand, type MenuPoint } from "./LayerContextMenu";
 import { pasteLayerSelection, moveArtworkGroup, transferArtwork, transferGroup, transferProcess } from './transferLayer';
 import { buildLayerTree, findLayerGroup, groupLayers, layerGroupAncestors, layerGroupMembers, pruneLayerGroups, renameLayerGroup, reorderLayerUnits, ungroupLayer, type LayerTreeItem, type LayerUnitRef as LayerUnit } from './layerGroups';
 import FigmaIcon from './FigmaIcon';
+import { browserRuntime } from './runtime';
 import './project-library.css';
 
 const MATERIALS = STOCKS;
@@ -75,7 +83,9 @@ function CanvasToolMenu({title,children}: {title:string;children:ReactNode}) {
   <div className="canvas-tool-options" onClick={event=>{if(event.target instanceof Element&&event.target.closest('button')&&menu.current)menu.current.open=false}}>{children}</div>
  </details>
 }
-function Modal({title,children,onClose,wide=false,drawer=false}:{title:string;children:ReactNode;onClose:()=>void;wide?:boolean;drawer?:boolean}) {
+function Modal({title,children,onClose,wide=false,drawer=false,className='',closeDisabled=false}:{
+ title:string;children:ReactNode;onClose:()=>void;wide?:boolean;drawer?:boolean;className?:string;closeDisabled?:boolean
+}) {
  const ref=useRef<HTMLDialogElement>(null);
  useEffect(()=>{
   const dialog=ref.current!;
@@ -89,11 +99,11 @@ function Modal({title,children,onClose,wide=false,drawer=false}:{title:string;ch
    if(trigger instanceof HTMLElement&&trigger.isConnected)trigger.focus({preventScroll:true});
   };
  },[]);
- return <dialog ref={ref} className={`modal ${wide?'wide':''} ${drawer?'drawer':''}`} aria-label={title}
+ return <dialog ref={ref} className={`modal ${wide?'wide':''} ${drawer?'drawer':''} ${className}`} aria-label={title}
    onCancel={event=>{event.preventDefault();onClose()}}
    onClick={event=>{if(event.target===event.currentTarget)onClose()}}>
   <div className="modal-content">
-   <div className="modal-head"><h2>{title}</h2><IconButton icon={X} title="关闭" onClick={onClose}/></div>
+   <div className="modal-head"><h2>{title}</h2><IconButton icon={X} title="关闭" onClick={onClose} disabled={closeDisabled}/></div>
    {children}
   </div>
  </dialog>;
@@ -132,7 +142,6 @@ export default function App() {
  const [notice,setNotice]=useState('');
  const [failure,setFailure]=useState('');
  const [filter,setFilter]=useState<'active'|'archived'>('active');
- const [showAllProjects,setShowAllProjects]=useState(false);
  const [newOpen,setNewOpen]=useState(false);
  const [operation,setOperation]=useState('');
  const [archiveTarget,setArchiveTarget]=useState<ProjectSummary|null>(null);
@@ -208,14 +217,14 @@ export default function App() {
   catch(error){setFailure((error as Error).message)}
   finally{opening.current=false;setOperation('')}
  };
- const open=(item:ProjectSummary)=>void perform('正在打开卡牌…',async()=>enter(await readProject(item.id)));
+ const open=(item:ProjectSummary)=>void perform('正在打开项目…',async()=>enter(await readProject(item.id)));
  const importFile=(file:File)=>void perform('正在读取项目包…',async()=>{
   const project=await importProject(file);
-  enter(await createStoredProject({...project,id:uid()}));
+  enter(await createStoredProject(copyProject(project)));
  });
- const duplicate=(item:ProjectSummary)=>void perform('正在复制卡牌…',async()=>{
+ const duplicate=(item:ProjectSummary)=>void perform('正在复制项目…',async()=>{
   const {project}=await readProject(item.id);
-  enter(await createStoredProject({...project,id:uid(),name:(project.name.slice(0,494)+' 副本'),version:1}));
+  enter(await createStoredProject(copyProject(project,project.name.slice(0,494)+' 副本',1)));
  });
  const changeArchived=(item:ProjectSummary,archived:boolean)=>void perform(archived?'正在归档…':'正在恢复…',async()=>{
   try {
@@ -243,14 +252,13 @@ export default function App() {
     return (ar<0?Infinity:ar)-(br<0?Infinity:br)||b.updatedAt-a.updatedAt;
    }).slice(0,4)}
    archived={filter==='archived'} ready={status==='ready'} offline={status==='error'}
-   showAll={showAllProjects} onShowAll={()=>setShowAllProjects(true)}
    busy={!!operation} message={failure||operation||notice} error={!!failure}
    onToggleArchived={()=>setFilter(value=>value==='active'?'archived':'active')}
    onRefresh={()=>void refresh()} onImport={()=>fileInput.current?.click()}
    onCreate={()=>{setFailure('');setNewOpen(true)}} onOpen={open}
    onArchive={setArchiveTarget} onRestore={item=>changeArchived(item,false)} onDuplicate={duplicate}
    onExport={item=>void perform('正在打包项目…',async()=>{const {project}=await readProject(item.id);await exportProject(project)})}/>
-  {newOpen&&<NewProject pending={operation!==''} error={failure} onClose={()=>{if(!operation){setFailure('');setNewOpen(false)}}} onCreate={project=>void perform('正在创建卡牌…',async()=>{
+  {newOpen&&<NewProject pending={operation!==''} error={failure} onClose={()=>{if(!operation){setFailure('');setNewOpen(false)}}} onCreate={project=>void perform('正在创建项目…',async()=>{
    const record=await createStoredProject(project);setNewOpen(false);enter(record);
   })}/>}
   {archiveTarget&&<Modal title="归档卡牌" onClose={()=>{if(!operation)setArchiveTarget(null)}}>
@@ -262,7 +270,8 @@ export default function App() {
 
 function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;initialPreview:boolean;onBack:()=>void;onOpen:(record:StoredProject)=>void}) {
  const [project,setProject]=useState(record.project);
- const [side,setSide]=useState<SideName>('front'),[selectedId,setSelected]=useState<string|null>(null);
+ const [selectedSide,setSide]=useState<SideName>('front'),[selectedId,setSelected]=useState<string|null>(null);
+ const side=project.singleSided?'front':selectedSide;
  const [inspectorTab,setInspectorTab]=useState<'design'|'properties'>('design');
  const [processView,setProcessView]=useState<ProcessView>('all');
  const [tool,setTool]=useState<EditorTool>('select');
@@ -280,8 +289,11 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
  const [layerSearchOpen,setLayerSearchOpen]=useState(false);
  const layerSearchInput=useRef<HTMLInputElement>(null);
  const [regionDraft,setRegionDraft]=useState<Region|null>(null),[brushSize,setBrushSize]=useState(32);
- const [modal,setModal]=useState<'rename'|'preview'|'size'|'export'|'crop'|'maskContent'|'maskUnion'|'production'|null>(initialPreview?'preview':null);
+ const [modal,setModal]=useState<'rename'|'preview'|'size'|'export'|'crop'|'maskContent'|'maskUnion'|'production'|'plateProof'|'stockMatch'|null>(initialPreview?'preview':null);
  const [productionTab,setProductionTab]=useState<'spec'|'order'>('spec'),[printEntry,setPrintEntry]=useState(0);
+ const [stillView,setStillView]=useState<StillView>();
+ const [proofFactory,setProofFactory]=useState(false);
+ const [stockChange,setStockChange]=useState<{material:string;stockSpec:StockSpec}>();
  const [returnToPlan,setReturnToPlan]=useState(false);
  const [toast,setToast]=useState('');
  const [leaving,setLeaving]=useState(false);
@@ -300,11 +312,12 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
  const layerList=useRef<HTMLDivElement>(null);
  const {state:save,queueSave,saveNow}=useProjectSave(record,current);
  const saveError=save.status==='error'||save.status==='conflict';
- const saveState=save.status==='saved'?'已保存到本机':save.status==='saving'?'正在保存…':save.status==='conflict'?'有更新冲突':'保存失败';
+ const saveState=save.status==='saved'?(browserRuntime?'已保存到此浏览器':'已保存到本机'):save.status==='saving'?'正在保存…':save.status==='conflict'?'有更新冲突':'保存失败';
  const active=project[side],selected=active.nodes.find(n=>n.id===selectedId&&n.type!=='empty'),effect=active.effects.find(e=>e.id===selectedId);
  const selectedUnits=layerSelection.filter(unit=>unit.kind==='group'?findLayerGroup(active,unit.id):
   unit.kind==='artwork'?active.nodes.some(node=>node.id===unit.id&&node.type!=='empty'):active.effects.some(entry=>entry.id===unit.id));
  const selectedGroup=selectedUnits.length===1&&selectedUnits[0].kind==='group'?findLayerGroup(active,selectedUnits[0].id):undefined;
+ const parentLayout=layoutParent(active,selected?.id??selectedGroup?.id??'')?.autoLayout;
  const selectionUnits:LayerUnit[]=selected? [{kind:'artwork',id:selected.id}]
   :effect?[{kind:'process',id:effect.id}]:selectedUnits;
  const selectionParts={
@@ -388,13 +401,29 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   }
   coalesce.current=key?{key,time:now}:null;
   future.current=[];
-  const updated={...next,front:pruneLayerGroups(next.front),back:pruneLayerGroups(next.back),version:current.current.version+1,updatedAt:now};
+  const prepare=(face:SideName)=>next[face]===current.current[face]?next[face]:applyAutoLayout(pruneLayerGroups(next[face]));
+  const updated={...next,front:prepare('front'),back:prepare('back'),version:current.current.version+1,updatedAt:now};
   current.current=updated;
   setProject(updated);
   queueSave();
  },[queueSave]);
  const changeCanvasSide=useCallback((next:CardSide,face:SideName)=>commit({...current.current,[face]:next}),[commit]);
  const changeSide=useCallback((next:CardSide)=>changeCanvasSide(next,side),[changeCanvasSide,side]);
+ const changeBase=(material:string,stockSpec:StockSpec)=>{
+  const doc=current.current;
+  const next={...doc,material,stockSpec};
+  if(stockKeys(doc).stockKey===stockKeys(next).stockKey)return;
+  if(next.production)next.production={...next.production,stockCode:undefined};
+  for(const face of BOTH_FACES){
+   const review=doc[face].effects.some(effect=>effectInProduction(effect)&&plateFor(effect));
+   next[face]=resetStockFinishMatch(doc,face,review);
+  }
+  commit(next);
+ };
+ const changeFinish=(finish:StockFinish,continuous=false)=>{
+  const doc=current.current;
+  commit({...doc,[side]:{...doc[side],stockFinish:finish}},continuous?'stock-opacity-'+side:undefined,continuous);
+ };
  const patchNode=(patch:Partial<CardNode>,continuous=false)=>{
   if(!selectedId)return;
   const doc=current.current;
@@ -423,7 +452,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   setTool('select');setShowLayerMask(false);setProcessView('all');setLayerPlate(undefined);
  };
  const alignNode=(axis:'x'|'y',fraction:number)=>{
-  if(!selected||selected.locked)return;
+  if(!selected||selected.locked||parentLayout)return;
   const angle=selected.rotation*Math.PI/180;
   const cos=Math.cos(angle),sin=Math.sin(angle);
   const corners=[[0,0],[selected.width,0],[0,selected.height],[selected.width,selected.height]];
@@ -472,7 +501,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   setLeaving(true);
   try {
    const snapshot=current.current;
-   onOpen(await createStoredProject({...snapshot,id:uid(),name:snapshot.name.slice(0,494)+' 副本',version:1}));
+   onOpen(await createStoredProject(copyProject(snapshot,snapshot.name.slice(0,494)+' 副本',1)));
   } catch(error) {notify((error as Error).message);setLeaving(false)}
  };
  const deleteNode=(node:CardNode,removeEffects:boolean)=>{const removed=new Set(active.regions.filter(r=>r.nodeId===node.id).map(r=>r.id));for(const r of active.regions)if(r.sources?.some(id=>removed.has(id)))removed.add(r.id);changeSide({...active,nodes:active.nodes.filter(n=>n.id!==node.id),regions:removeEffects?active.regions.filter(r=>!removed.has(r.id)):active.regions.map(r=>r.nodeId===node.id?{...r,binding:'fixed',nodeId:undefined,snapshot:structuredClone(r.snapshot||node),bounds:r.bounds}:r),effects:removeEffects?active.effects.filter(e=>!removed.has(e.regionId)):active.effects});setSelected(null);setConfirmDelete(null)};
@@ -521,6 +550,20 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
  const selectedNodes=active.nodes.filter(node=>selectedArtworkIds.includes(node.id));
  const artworkOnly=selectedNodes.length>0&&selectedNodes.length===selectedCount;
  const editableArtwork=artworkOnly&&selectedNodes.every(node=>!node.locked);
+ const canAddLayout=editableArtwork&&(Boolean(selectedGroup)||selectionUnits.length>1);
+ const toggleAutoLayout=()=>{
+  if(regionDraft||leaving)return;
+  const face=current.current[side];
+  if(selectedGroup?.autoLayout){changeSide(setAutoLayout(face,selectedGroup.id,undefined));return}
+  if(!canAddLayout)return;
+  const grouped=selectedGroup?{side:face,groupId:selectedGroup.id}:groupLayers(face,selectionParts);
+  if(!grouped){notify('请选择同一层级的彩稿图层');return}
+  const layout=createAutoLayout(grouped.side,grouped.groupId);
+  if(!layout)return;
+  changeSide(setAutoLayout(grouped.side,grouped.groupId,layout));
+  selectLayer(null);
+  setLayerSelection([{kind:'group',id:grouped.groupId}]);setCollapsedRight(false);setLayerQuery('');
+ };
  const copySelection=()=>setCopied({origin:active,units:selectionUnits.map(({kind,id})=>({kind,id}))});
  const pasteSelection=(replace:boolean)=>{
   if(!copied)return;
@@ -578,10 +621,12 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   }},
   {label:'水平翻转',shortcut:'⇧ H',enabled:editableArtwork,run:()=>flipSelection('flipX')},
   {label:'垂直翻转',shortcut:'⇧ V',enabled:editableArtwork,run:()=>flipSelection('flipY')},
+  ...(canAddLayout||selectedGroup?.autoLayout?[{label:selectedGroup?.autoLayout?'关闭自动布局':'添加自动布局',
+   shortcut:selectedGroup?.autoLayout?undefined:'⇧ A',enabled:true,run:toggleAutoLayout}]:[]),
  ];
  useEffect(()=>{
   const handler=(e:KeyboardEvent)=>{
-   if(modal||confirmDelete||leaving||e.defaultPrevented||e.isComposing)return;
+   if(modal||stockChange||confirmDelete||leaving||e.defaultPrevented||e.isComposing)return;
    const mod=e.metaKey||e.ctrlKey,key=e.key.toLowerCase();
    const target=e.target instanceof HTMLElement?e.target:null;
    if(mod&&key==='s'){e.preventDefault();void saveNow();return}
@@ -619,6 +664,9 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
     e.preventDefault();
     if(e.shiftKey)dissolveLayerGroup();else formLayerGroup();
    }
+   else if(!mod&&!e.altKey&&e.shiftKey&&key==='a'&&canAddLayout&&!selectedGroup?.autoLayout){
+    e.preventDefault();toggleAutoLayout();
+   }
    else if(mod&&e.altKey&&e.code==='KeyC'&&selected){e.preventDefault();copyStyle()}
    else if(mod&&e.altKey&&e.code==='KeyV'&&selected){e.preventDefault();pasteStyle()}
    else if(mod&&key==='d'){e.preventDefault();duplicateLayer()}
@@ -636,10 +684,10 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
    else if(!mod&&key==='v')setTool('select');
    else if(!mod&&key==='h')setTool('hand');
    else if(!mod&&!e.altKey&&(key==='l'||key==='p'))activateCanvasTool(key==='l'?'line':'pen');
-   else if(e.key.startsWith('Arrow')&&selected&&!selected.locked){
+   else if(e.key.startsWith('Arrow')&&selected&&!selected.locked&&!parentLayout){
     e.preventDefault();const delta=e.shiftKey?10:1;
     patchNode({x:selected.x+(e.key==='ArrowRight'?delta:e.key==='ArrowLeft'?-delta:0),y:selected.y+(e.key==='ArrowDown'?delta:e.key==='ArrowUp'?-delta:0)});
-   }else if(e.key.startsWith('Arrow')&&selectedGroup){
+   }else if(e.key.startsWith('Arrow')&&selectedGroup&&!parentLayout){
     const step=e.shiftKey?10:1;
     const delta={x:e.key==='ArrowRight'?step:e.key==='ArrowLeft'?-step:0,y:e.key==='ArrowDown'?step:e.key==='ArrowUp'?-step:0};
     if(delta.x||delta.y){
@@ -651,7 +699,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   };
   window.addEventListener('keydown',handler);
   return()=>window.removeEventListener('keydown',handler);
- },[modal,selected,selectedGroup,layerSelection,project,side,confirmDelete,undo,redo,leaving,regionDraft,saveNow,tool,processView]);
+ },[modal,stockChange,selected,selectedGroup,layerSelection,project,side,confirmDelete,undo,redo,leaving,regionDraft,saveNow,tool,processView]);
  useEffect(()=>{
   const release=()=>setSpaceHeld(false);
   const onKeyUp=(event:KeyboardEvent)=>{if(event.code==='Space')release()};
@@ -659,7 +707,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   window.addEventListener('blur',release);
   return()=>{window.removeEventListener('keyup',onKeyUp);window.removeEventListener('blur',release)};
  },[]);
- useEffect(()=>{if(modal||confirmDelete||leaving)setSpaceHeld(false)},[modal,confirmDelete,leaving]);
+ useEffect(()=>{if(modal||stockChange||confirmDelete||leaving)setSpaceHeld(false)},[modal,stockChange,confirmDelete,leaving]);
  const addNode=(type:'text'|'rect'|'ellipse'|'polygon')=>{
   if(regionDraft||leaving)return;
   const doc=current.current;
@@ -667,6 +715,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   const width=Math.min(doc.widthMm*7,330),height=Math.min(doc.heightMm*5,type==='text'?70:180);
   const node:CardNode={
    ...createArtwork(face,type),x:(doc.widthMm*10-width)/2,y:(doc.heightMm*10-height)/2,width,height,
+   groupId:editableArtwork&&selectedGroup?.autoLayout?selectedGroup.id:undefined,
    fill:type==='text'?'#27332b':'#d2b87e',text:type==='text'?'新文字':undefined,
    fontSize:36,fontFamily:'Work Sans, PingFang SC, sans-serif',
   };
@@ -721,6 +770,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
    const width=image.width*scale,height=image.height*scale;
    const node:CardNode={
     ...createArtwork(face,'image'),x:(doc.widthMm*10-width)/2,y:(doc.heightMm*10-height)/2,
+    groupId:editableArtwork&&selectedGroup?.autoLayout&&findLayerGroup(face,selectedGroup.id)?.autoLayout?selectedGroup.id:undefined,
     width,height,fill:'#fff',src:image.src,
    };
    commit({...doc,[side]:{...face,nodes:[...face.nodes,node]}});
@@ -818,7 +868,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
  const openPlan=(tab:'spec'|'order')=>{setProductionTab(tab);setModal('production')};
  const closeSize=()=>{setModal(returnToPlan?'production':null);setReturnToPlan(false)};
  const switchSide=(face:SideName)=>{
-  if(face===activeFace.current)return;
+  if(face===activeFace.current||(face==='back'&&current.current.singleSided))return;
   coalesce.current=null;
   activeFace.current=face;setSide(face);selectLayer(null);setImageIssue(null);
   if(tool!=='line'&&tool!=='pen')setTool('select');
@@ -840,6 +890,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   const closed=geometry.type==='path'&&geometry.pathClosed;
   const node:CardNode={
    ...createArtwork(card,geometry.type),...geometry,
+   groupId:face===side&&editableArtwork&&selectedGroup?.autoLayout?selectedGroup.id:undefined,
    fill:closed?'#d2b87e':'transparent',
    stroke:'#237ac2',strokeWidth:2,strokeAlign:'center',
   };
@@ -1091,7 +1142,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
     )}
    </div>
    <button className="stack-link layer-stock" disabled={!!regionDraft} onClick={openCardProperties}>
-    <span>卡基与底材<small>{STOCKS.find(stock=>stock.id===project.material)?.name} · {STOCK_REFLECTIONS[getStockReflection(project)]}</small></span>
+    <span>卡基与底材<small>{stockPreset(project.material)?.name??project.material} · {STOCK_REFLECTIONS[getStockReflection(project,side)]}</small></span>
     <FigmaIcon name="stock-chevron"/>
    </button>
    <div className="panel-toolbar layer-panel-heading">
@@ -1172,7 +1223,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
     <img className="editor-avatar" src="/assets/workbench/local-avatar.png" width="24" height="24" alt=""/>
     <div className="drawer-main-actions">
      <IconButton icon={<FigmaIcon name="finished-preview"/>} title="成品预览" onClick={()=>setModal('preview')} disabled={leaving||!!regionDraft||readingImages>0}/>
-     <Button className="primary drawer-text-action" onClick={()=>setModal('export')} disabled={leaving||!!regionDraft||readingImages>0}>导出</Button>
+     <Button className="primary drawer-text-action" onClick={()=>{setStillView(undefined);setModal('export')}} disabled={leaving||!!regionDraft||readingImages>0}>导出</Button>
     </div>
    </header>
    <div className="inspector-view-header">
@@ -1180,7 +1231,7 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
      {hasDesign?<>
       <button type="button" aria-pressed={rightTab==='design'} onClick={()=>setInspectorTab('design')}>设计</button>
       <button type="button" aria-pressed={rightTab!=='design'} onClick={()=>setInspectorTab('properties')}>属性</button>
-     </>:<span className="inspector-view-label">属性</span>}
+     </>:<span className="inspector-view-label">{rightTab==='group'?'设计':'属性'}</span>}
     </div>
     <Button className="icon-button inspector-collapse" title="收起右侧面板" onClick={()=>setCollapsedRight(true)}>
      <FigmaIcon name="panel-right-close"/>
@@ -1219,7 +1270,15 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
      setRegionDraft({...regionDraft,id:uid(),name:regionDraft.name.slice(0,96)+' 副本',groupMotionCopy:undefined})
     }><Copy size={14}/>复制为独立蒙版</Button>}
    </div>:<>
-   {rightTab==='group'&&selectedGroup&&<Button className="wide-button" onClick={dissolveLayerGroup}>解组</Button>}
+   {rightTab==='group'&&selectedGroup&&<>
+    {selectedGroup.autoLayout?<AutoLayoutProperties key={selectedGroup.id} layout={selectedGroup.autoLayout}
+     locked={!editableArtwork} onRemove={toggleAutoLayout} onChange={layout=>changeSide(setAutoLayout(current.current[side],selectedGroup.id,layout))}/>
+     :canAddLayout&&<Button className="wide-button" onClick={toggleAutoLayout}>添加自动布局</Button>}
+    {parentLayout&&selectedGroup.autoLayout&&<LayoutItemProperties item={selectedGroup.layoutItem} parent={parentLayout} allowHug
+     disabled={!editableArtwork} onChange={layoutItem=>changeSide({...active,groups:active.groups?.map(group=>
+      group.id===selectedGroup.id?{...group,layoutItem}:group)})}/>}
+    <Button className="wide-button" onClick={dissolveLayerGroup}>解组</Button>
+   </>}
    {rightTab==='effects'&&effect&&<div className="effect-properties current-process">
     <div className="section-heading"><span>{processName(effect)}</span>
      <div className="panel-toolbar-actions">
@@ -1229,6 +1288,8 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
     </div>
     <label className="field">图层名称<input maxLength={100} value={effect.name} onChange={event=>patchEffect({name:event.target.value})}/></label>
     <LayerTypeField kind={processKind(effect)} onChange={changeKind}/>
+    <label className="check-field"><input type="checkbox" checked={effectInProduction(effect)}
+     onChange={event=>patchEffect({productionEnabled:event.target.checked})}/>纳入印刷输出</label>
     <LayerMaskField name="工艺蒙版" regions={maskRegions} value={targetRegion?.id} noMask={effect.maskContent?.length===0}
      sources={active.nodes.filter(node=>node.type!=='empty'&&node.visible)} onChange={selectMask}/>
     {processKind(effect)==='reflection'&&<FlashStyles value={getFlashStyle(project,effect)} onChange={flashStyle=>{
@@ -1272,7 +1333,9 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
     </StyleSection>
    </>}
    {rightTab==='design'&&selected&&<>
-     <LayerGeometry key={selected.id} node={selected} onChange={patchStyle} onEditStart={startStyleEdit}>
+     {parentLayout&&<LayoutItemProperties key={'layout-'+selected.id} item={selected.type==='text'?{heightMode:'hug',...selected.layoutItem}:selected.layoutItem} parent={parentLayout}
+      allowHug={selected.type==='text'} disabled={selected.locked} onChange={layoutItem=>patchNode({layoutItem})}/>}
+     <LayerGeometry key={selected.id} node={selected} managedPosition={Boolean(parentLayout)} onChange={patchStyle} onEditStart={startStyleEdit}>
      <div className="style-fields inspector-alignments" aria-label="对齐到卡面">
        <div className="style-segmented">
         <StyleAction label="对齐到卡面右侧" disabled={selected.locked} onClick={()=>alignNode('x',1)}><FigmaIcon name="align-horizontal-end"/></StyleAction>
@@ -1301,10 +1364,11 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
     </StyleSection>
    </>}
    {rightTab==='material'&&<><div className="section-heading">卡基与底材</div>
-    <StockPicker material={project.material} reflection={getStockReflection(project)}
-      onMaterial={material=>commit({...current.current,material,stockReflection:defaultStockReflection(material)})}
-      onReflection={stockReflection=>commit({...current.current,stockReflection})}/>
-    <div className="section-heading">版面规格</div><div className="spec-list"><span>成品尺寸<b>{project.widthMm} × {project.heightMm} mm</b></span><span>出血<b>{project.bleedMm} mm</b></span><span>圆角半径<b>{getCardCornerRadiusMm(project)} mm</b></span><span>正文安全区<b>内缩 {PRINT_SAFE_MARGIN_MM} mm</b></span><span>生产状态<b>待工厂确认</b></span></div>
+    <StockPicker material={project.material} spec={effectiveStockSpec(project)??{}}
+      onMaterial={material=>setStockChange({material,stockSpec:changeStockSpec(material,project.material,effectiveStockSpec(project)??{})})}
+      onSpec={spec=>changeBase(project.material,spec)}/>
+    <StockFinishControls project={project} side={side} onSide={switchSide} onChange={changeFinish} onMatch={()=>setModal('stockMatch')}/>
+    <div className="section-heading">版面规格</div><div className="spec-list"><span>成品尺寸<b>{project.widthMm} × {project.heightMm} mm · {project.singleSided?'单面':'双面'}</b></span><span>出血<b>{project.bleedMm} mm</b></span><span>圆角半径<b>{getCardCornerRadiusMm(project)} mm</b></span><span>正文安全区<b>内缩 {getPrintSafeMarginMm(project)} mm</b></span><span>生产状态<b>待工厂确认</b></span></div>
     <Button className="wide-button" onClick={()=>setModal('size')}><Settings2 size={14}/>调整卡片尺寸</Button>
     <Button className="wide-button" onClick={()=>openPlan('spec')}><HugeiconsIcon icon={ClipboardListIcon} size={14} aria-hidden="true"/>规格与刀模</Button></>}
 
@@ -1320,15 +1384,26 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
   {modal==='crop'&&selected&&cropFill&&<Modal title="编辑图片裁切" wide onClose={closeModal}><CropEditor key={selected.id}
    node={{...selected,src:cropFill.src,crop:cropFill.crop}} onCancel={closeModal} onApply={applyCrop}
    preserveCrop={{checked:replaceCrop,onChange:setReplaceCrop}}/></Modal>}
-  {modal==='preview'&&<AlbumPreview cardBoundsRef={cardBoundsRef} project={project} initialSide={side} material={MATERIALS.find(m=>m.id===project.material)?.name} onClose={closeModal} onExport={()=>setModal('export')}/>}
+  {modal==='preview'&&<AlbumPreview cardBoundsRef={cardBoundsRef} project={project} initialSide={side} material={MATERIALS.find(m=>m.id===project.material)?.name}
+   onClose={closeModal} onExport={view=>{setStillView(view);setModal('export')}}/>}
+  {modal==='plateProof'&&<Modal title="分版核稿" wide onClose={()=>setModal('export')}>
+   <PlateProof project={project} initialSide={side} applyFactory={proofFactory}/>
+  </Modal>}
   {modal==='production'&&<Modal title="卡牌制作" drawer onClose={closeModal}>
    <ProductionPlanEditor project={project} material={MATERIALS.find(m=>m.id===project.material)?.name||project.material}
-    initialTab={productionTab} onChange={(production,key)=>commit({...current.current,production},key)} onArtwork={closeModal}
+    initialTab={productionTab} onChange={(production,key)=>{
+     const doc=current.current;
+     const next={...doc,production};
+     if(stockKeys(doc).profileKey!==stockKeys(next).profileKey){
+      for(const face of BOTH_FACES)if(doc[face].stockFinish?.match)next[face]=resetStockFinishMatch(doc,face);
+     }
+     commit(next,key);
+    }} onArtwork={closeModal}
     onSize={()=>{setReturnToPlan(true);setModal('size')}} onStock={()=>{openCardProperties();closeModal()}}
     onPreflight={()=>{setPrintEntry(entry=>entry+1);setModal('export')}} onLocate={locateProductionLayer}/>
   </Modal>}
   <ExportPanel open={modal==='export'} project={project} onClose={closeModal} notify={notify}
-   printEntry={printEntry} onProduction={()=>openPlan('order')} onLocate={target=>{
+   printEntry={printEntry} stillView={stillView} onPlateProof={applyFactory=>{setProofFactory(applyFactory);setModal('plateProof')}} onProduction={()=>openPlan('order')} onLocate={target=>{
    switchSide(target.side);
    const face=project[target.side];
    const linkedEffect=face.effects.find(item=>item.id===target.effectId);
@@ -1338,7 +1413,26 @@ function Editor({record,initialPreview,onBack,onOpen}:{record:StoredProject;init
    else if(linkedNode)setInspectorTab('design');
    setCollapsedRight(false);setModal(null);
   }}/>
-  {modal==='size'&&<SizeModal project={project} onClose={closeSize} onApply={p=>{commit(p);closeSize();notify('尺寸已更新')}}/>}
+  {modal==='size'&&<SizeModal project={project} onClose={closeSize} onApply={p=>{
+   if(p.singleSided&&side==='back')switchSide('front');
+   commit(p);closeSize();notify('尺寸已更新');
+  }}/>}
+  {modal==='stockMatch'&&<Modal title={'匹配反光用料 · '+(side==='front'?'正面':'背面')} onClose={closeModal}>
+   <StockFinishMatchForm project={project} side={side} onClose={closeModal} onPlan={()=>openPlan('spec')} onApply={match=>{
+    changeFinish({...getStockFinish(current.current,side),match,reviewRequired:undefined});
+    closeModal();
+   }}/>
+  </Modal>}
+  {stockChange&&<Modal title="确认更换卡基" onClose={()=>setStockChange(undefined)}>
+   <div className="new-content spec-list">
+    <span>当前<b>{stockPreset(project.material)?.name??project.material}</b></span>
+    <span>更换为<b>{stockPreset(stockChange.material)?.name}</b></span>
+    {project.production?.stockCode&&<p className="micro-copy">更换后请重新匹配印厂用料。</p>}
+   </div>
+   <div className="modal-footer"><Button onClick={()=>setStockChange(undefined)}>取消</Button><Button className="primary" onClick={()=>{
+    changeBase(stockChange.material,stockChange.stockSpec);setStockChange(undefined);
+   }}>应用卡基</Button></div>
+  </Modal>}
   {confirmDelete&&<Modal title="这个图层关联了作用区域" onClose={()=>setConfirmDelete(null)}><div className="help-content"><p>删除「{confirmDelete.name}」后，可以把关联区域固定在当前位置，继续保留效果。</p><div className="inline-actions"><Button onClick={()=>deleteNode(confirmDelete,true)}>连同区域与效果删除</Button><Button className="primary" onClick={()=>deleteNode(confirmDelete,false)}>保留区域，删除图层</Button></div></div></Modal>}
  </div>
 }
@@ -1369,35 +1463,73 @@ function RenameProject({name,onClose,onRename}:{name:string;onClose:()=>void;onR
 }
 
 function NewProject({onClose,onCreate,pending,error}:{onClose:()=>void;onCreate:(project:Project)=>void;pending:boolean;error:string}){
- const [phase,setPhase]=useState<'stock'|'layout'>('stock');
+ const [name,setName]=useState(''),[note,setNote]=useState('');
  const [material,setMaterial]=useState('matte');
- const [reflection,setReflection]=useState<StockReflection>('none');
- const [template,setTemplate]=useState<TemplateName>('blank');
- const draft=useRef<{template:TemplateName;name:string;material:string;reflection:StockReflection;project:Project}|null>(null);
- const [name,setName]=useState('');
- const [samples]=useState(()=>Object.fromEntries((['ocean','botanical','editorial','blank'] as const).map(key=>[key,createProject(key)])) as Record<TemplateName,Project>);
- return <Modal title="新建卡牌" onClose={onClose} wide>
-  {phase==='stock'?<><div className="new-content">
-    <p className="template-intro">先选择卡基与底材反光</p>
-    <StockPicker material={material} reflection={reflection}
-      onMaterial={value=>{setMaterial(value);setReflection(defaultStockReflection(value))}} onReflection={setReflection}/>
-   </div><div className="modal-footer"><Button onClick={onClose}>取消</Button><Button className="primary" onClick={()=>setPhase('layout')}>下一步：选版式<ChevronRight size={15}/></Button></div></>:<>
-  <div className="new-content">
-   <p className="template-intro">{MATERIALS.find(stock=>stock.id===material)?.name} · {STOCK_REFLECTIONS[reflection]}</p>
-   <div className="template-grid">{(Object.keys(samples) as TemplateName[]).map(key=><button key={key} className={template===key?'selected':''} aria-pressed={template===key} onClick={()=>setTemplate(key)}><div className={`template-cover ${key}`}>{key==='blank'?<Square size={34} strokeWidth={1}/>:<CardThumb project={samples[key]}/>}</div><span>{TEMPLATE_NAMES[key]}{template===key&&<Check size={14}/>}</span></button>)}</div>
+ const [stockSpec,setStockSpec]=useState<StockSpec>(()=>stockPreset('matte')!.defaults);
+ const [sizeIndex,setSizeIndex]=useState(0);
+ const [customSize,setCustomSize]=useState<{width:string;height:string}>();
+ const preset=CARD_SIZE_PRESETS[sizeIndex];
+ const dimensions=preset?{width:preset.width.toFixed(2),height:preset.height.toFixed(2)}:customSize!;
+ const width=Number(dimensions.width),height=Number(dimensions.height);
+ const validSize=width>=20&&width<=300&&height>=20&&height<=300;
+ const draft=useRef<{key:string;project:Project}|null>(null);
+ const submit=()=>{
+  if(pending||!validSize)return;
+  const title=name.trim()||TEMPLATE_NAMES.blank;
+  const remark=note.trim();
+  const key=JSON.stringify([title,remark,width,height,material,stockSpec]);
+  if(draft.current?.key!==key){
+   draft.current={key,project:{
+    ...createProject('blank',title),note:remark||undefined,widthMm:width,heightMm:height,material,stockSpec,
+   }};
+  }
+  onCreate(draft.current.project);
+ };
+ return <Modal title="新建项目" className="new-project-modal" onClose={onClose} closeDisabled={pending}>
+  <form className="new-project-form" noValidate onSubmit={event=>{event.preventDefault();submit()}}>
    <div className="new-project-fields">
-    <label className="field">项目名称<input value={name} placeholder={TEMPLATE_NAMES[template]} maxLength={80} onChange={e=>setName(e.target.value)}/></label>
-    <p className="micro-copy">63 × 88 mm · 双面 · 3 mm 出血<br/>可在工作台调整尺寸。</p>
+    <fieldset aria-label="项目设置" disabled={pending}>
+     <label className="field">项目名称<input value={name} placeholder={TEMPLATE_NAMES.blank} maxLength={80}
+      onChange={event=>setName(event.target.value)}/></label>
+     <label className="field">备注<input value={note} placeholder="请输入备注" maxLength={MAX_PROJECT_NOTE_LENGTH}
+      onChange={event=>setNote(event.target.value)}/></label>
+     <div className="new-project-size">
+      <label className="field">卡牌尺寸
+       <span className="stock-select">
+        <select value={sizeIndex} onChange={event=>{
+         const index=Number(event.target.value);
+         if(index===-1&&!customSize)setCustomSize(dimensions);
+         setSizeIndex(index);
+        }}>
+         <CardSizePresetOptions/>
+         <option value="-1">自定义</option>
+        </select>
+       </span>
+      </label>
+      <div className="new-project-dimensions">
+       {(['width','height'] as const).map(axis=>{
+        const value=Number(dimensions[axis]);
+        return <label className="new-project-measure" key={axis}>
+         <span aria-hidden="true">{axis==='width'?'宽':'高'}</span>
+         <input type="number" aria-label={axis==='width'?'宽度（mm）':'高度（mm）'} min={20} max={300} step="any"
+          aria-invalid={value<20||value>300||undefined} disabled={Boolean(preset)} value={dimensions[axis]}
+          onChange={event=>setCustomSize({...dimensions,[axis]:event.target.value})}/>
+         <span aria-hidden="true">mm</span>
+        </label>;
+       })}
+      </div>
+      {!validSize&&<p className="new-project-error" role="alert">宽高须在 20–300 mm 之间。</p>}
+     </div>
+     <StockPicker material={material} spec={stockSpec} onSpec={setStockSpec} presetMeasurements
+      onMaterial={value=>{setStockSpec(changeStockSpec(value,material,stockSpec));setMaterial(value)}}/>
+     {error&&<p className="new-project-error" role="alert">{error}</p>}
+    </fieldset>
    </div>
-  </div>
-  {error&&<p className="new-content library-error" role="alert">{error}</p>}
-  <div className="modal-footer"><Button disabled={pending} onClick={()=>setPhase('stock')}>上一步</Button><Button className="primary" disabled={pending} onClick={()=>{
-   const title=name.trim();
-   if(!draft.current||draft.current.template!==template||draft.current.name!==title||draft.current.material!==material||draft.current.reflection!==reflection) {
-    draft.current={template,name:title,material,reflection,project:{...createProject(template,title||undefined),material,stockReflection:reflection}};
-   }
-   onCreate(draft.current.project);
-  }}><Plus size={15}/>创建卡牌</Button></div></>}
+   <div className="modal-footer">
+    <Button disabled={pending} onClick={onClose}>取消</Button>
+    <button type="submit" className="button primary" disabled={pending||!validSize}>{pending?'新建中…':'新建'}</button>
+   </div>
+  </form>
  </Modal>;
 }
 
@@ -1406,20 +1538,26 @@ const CARD_SIZE_PRESETS = [
  { label: '球星卡', width: 63.5, height: 88.9 },
  { label: '游戏王卡牌', width: 59, height: 86 },
  { label: '塔罗牌', width: 70, height: 120 },
+ { label: '万智牌', width: 63, height: 88 },
+ { label: '海贼王卡牌', width: 63, height: 88 },
+ { label: '迪士尼洛卡纳', width: 63, height: 88 },
+ { label: 'Riftbound 符文战场', width: 63, height: 88 },
+ { label: '高达卡牌', width: 63, height: 88 },
+ { label: 'Union Arena', width: 63, height: 88 },
+ { label: '龙珠超 Fusion World', width: 63, height: 88 },
+ { label: '数码宝贝卡牌', width: 63, height: 88 },
+ { label: 'Star Wars: Unlimited', width: 63, height: 88 },
 ] as const;
 
-function SizeModal({project,onClose,onApply}:{project:Project;onClose:()=>void;onApply:(p:Project)=>void}){
- const [width,setWidth]=useState(project.widthMm),[height,setHeight]=useState(project.heightMm),[bleed,setBleed]=useState(project.bleedMm);
- const [radius,setRadius]=useState(() => getCardCornerRadiusMm(project));
- const [mode,setMode]=useState('keep');
- const maxRadius=Math.max(0,Math.min(width,height)/2);
- const validSize=width>=20&&width<=300&&height>=20&&height<=300&&bleed>=0&&bleed<=20;
- const validRadius=Number.isFinite(radius)&&radius>=0&&radius<=maxRadius;
- const valid=validSize&&validRadius;
- const resize=()=>{
-  if(!valid)return;
+function CardSizePresetOptions() {
+ return CARD_SIZE_PRESETS.map(({label,width,height},index)=>
+  <option key={label} value={index}>{label} · {width} × {height} mm</option>
+ );
+}
+
+function resizeCard(project:Project,width:number,height:number,bleed:number,radius:number,fitArtwork:boolean) {
   const next={...structuredClone(project),widthMm:width,heightMm:height,bleedMm:bleed,cornerRadiusMm:radius};
-  if(mode==='scale'){
+  if(fitArtwork&&(project.widthMm!==width||project.heightMm!==height)){
    const scale=Math.min(width/project.widthMm,height/project.heightMm);
    const dx=(width-project.widthMm*scale)*5,dy=(height-project.heightMm*scale)*5;
    const scaleNode=(node:CardNode)=>{
@@ -1432,6 +1570,10 @@ function SizeModal({project,onClose,onApply}:{project:Project;onClose:()=>void;o
    for(const side of [next.front,next.back]){
     side.nodes.forEach(scaleNode);
     side.effects.forEach(effect=>effect.maskContent?.forEach(scaleNode));
+    for(const group of side.groups??[]){
+     if(!group.autoLayout)continue;
+     group.autoLayout=scaleAutoLayout(group.autoLayout,scale,scale,dx,dy);
+    }
     for(const region of side.regions){
      if(region.bounds){region.bounds.x=region.bounds.x*scale+dx;region.bounds.y=region.bounds.y*scale+dy;region.bounds.width*=scale;region.bounds.height*=scale}
      if(region.points)region.points=region.points.map((p,i)=>p*scale+(i%2?dy:dx));
@@ -1440,88 +1582,139 @@ function SizeModal({project,onClose,onApply}:{project:Project;onClose:()=>void;o
     }
    }
   }
-  onApply(next);
- };
+  return next;
+}
+
+function SizeModal({project,onClose,onApply}:{project:Project;onClose:()=>void;onApply:(p:Project)=>void}){
+ const [width,setWidth]=useState(project.widthMm),[height,setHeight]=useState(project.heightMm),[bleed,setBleed]=useState(project.bleedMm);
+ const [sizeIndex,setSizeIndex]=useState(-1);
+ const [radius,setRadius]=useState(() => getCardCornerRadiusMm(project));
+ const [singleSided,setSingleSided]=useState(Boolean(project.singleSided));
+ const [mode,setMode]=useState('keep');
+ const maxRadius=Math.max(0,Math.min(width,height)/2);
+ const validSize=width>=20&&width<=300&&height>=20&&height<=300&&bleed>=0&&bleed<=20;
+ const validRadius=Number.isFinite(radius)&&radius>=0&&radius<=maxRadius;
+ const valid=validSize&&validRadius;
+ const resize=()=>{if(valid)onApply({...resizeCard(project,width,height,bleed,radius,mode==='scale'),singleSided});};
  return <Modal title="卡片尺寸" onClose={onClose}><div className="new-content">
-  <fieldset className="size-presets">
-   <legend>常用成品尺寸</legend>
-   <div className="size-preset-grid">
-    {CARD_SIZE_PRESETS.map(preset => {
-     const selected = preset.width === width && preset.height === height;
-     return <button key={preset.label} type="button" className="size-preset" aria-pressed={selected}
-       onClick={() => { setWidth(preset.width); setHeight(preset.height); }}>
-      <span>
-       <strong>{preset.label}</strong>
-       <small>{preset.width} × {preset.height} mm</small>
-      </span>
-      {selected && <Check size={15} aria-hidden="true" />}
-     </button>;
-    })}
-   </div>
-  </fieldset>
+  <label className="field">常用成品尺寸
+   <select value={sizeIndex} onChange={event=>{
+    const index=Number(event.target.value);
+    const preset=CARD_SIZE_PRESETS[index];
+    setSizeIndex(index);
+    setWidth(preset.width);
+    setHeight(preset.height);
+   }}>
+    <option value={-1} disabled>选择尺寸预设</option>
+    <CardSizePresetOptions/>
+   </select>
+  </label>
   <div className="field-grid three">
-   <label className="field">宽度（mm）<input type="number" value={width} min={20} max={300} step="any" onChange={e=>setWidth(+e.target.value)}/></label>
-   <label className="field">高度（mm）<input type="number" value={height} min={20} max={300} step="any" onChange={e=>setHeight(+e.target.value)}/></label>
-   <label className="field">出血（mm）<input type="number" value={bleed} min={0} max={20} onChange={e=>setBleed(+e.target.value)}/></label>
+   <label className="field">宽度（mm）<input type="number" value={width} min={20} max={300} step="any" onChange={e=>{setWidth(+e.target.value);setSizeIndex(-1)}}/></label>
+   <label className="field">高度（mm）<input type="number" value={height} min={20} max={300} step="any" onChange={e=>{setHeight(+e.target.value);setSizeIndex(-1)}}/></label>
+   <label className="field">出血（mm）<input type="number" value={bleed} min={0} max={20} step="any" onChange={e=>setBleed(+e.target.value)}/></label>
   </div>
+  <label className="field">卡牌面数<select value={singleSided?'front':'both'} onChange={e=>setSingleSided(e.target.value==='front')}>
+   <option value="both">双面</option><option value="front">仅正面</option>
+  </select></label>
   <div className="corner-settings">
    <div>
     <label className="field">圆角半径（mm）<input type="number" value={radius} min={0} max={maxRadius} step=".1" aria-invalid={!validRadius} onChange={event=>setRadius(+event.target.value)}/></label>
     <p className="micro-copy">{validRadius?'0 mm 为直角。出血线和正文安全线随裁切线同步调整。':`圆角半径须在 0–${maxRadius} mm 之间。`}</p>
    </div>
-   {validSize&&<PrintCornerPreview project={{widthMm:width,heightMm:height,bleedMm:bleed,cornerRadiusMm:radius}}/>}
+   {validSize&&<PrintCornerPreview project={{widthMm:width,heightMm:height,bleedMm:bleed,cornerRadiusMm:radius,production:project.production}}/>}
   </div>
   <label className="field">图层处理<select value={mode} onChange={e=>setMode(e.target.value)}><option value="keep">保持对象实际尺寸</option><option value="scale">整体等比缩放并居中</option></select></label>
+  {projectPrintProfile(project)&&[width!==project.widthMm,height!==project.heightMm,bleed!==project.bleedMm,singleSided!==Boolean(project.singleSided)].some(Boolean)&&
+   <p className="micro-copy" role="status">规格或面数变更后，请用当前厂规重新预检。</p>}
   <p className="micro-copy">{validSize?`含出血 ${+(width+bleed*2).toFixed(2)} × ${+(height+bleed*2).toFixed(2)} mm`:'宽高须在 20–300 mm，出血须在 0–20 mm。'}</p>
  </div><div className="modal-footer"><Button onClick={onClose}>取消</Button><Button className="primary" disabled={!valid} onClick={resize}>应用尺寸</Button></div></Modal>;
 }
 
 type ExportMode='image'|'print'|'project';
-type PrintProfile='standard'|'alternate';
-type PreflightTarget={side:SideName;nodeId?:string;effectId?:string;material?:boolean};
-type ExportRequest={mode:ExportMode;project:Project;sides:SideName[];dpi:number;format:'png'|'jpeg';effects:boolean;profile:PrintProfile;includeGrain:boolean};
-type JobState={label:string;progress:number;error?:string;file?:Blob;name?:string;request:ExportRequest};
+type PrintProfile=TechnicalPrintProfile;
+type ExportRequest={mode:ExportMode;project:Project;sides:SideName[];dpi:number;format:'png'|'jpeg';effects:boolean;profile:PrintProfile;
+ includeGrain:boolean;applyFactory:boolean;imageWidth:number;imageHeight:number;imageBackground:string;view?:StillView;issues:PreflightIssue[]};
+type JobState={label:string;progress:number;error?:string;file?:Blob;name?:string;request:ExportRequest;unrecorded?:boolean};
 function usedPlates(project:Project,side:SideName){
- return PRINT_CHANNELS.filter(key=>project[side].effects.some(effect=>processLayerEnabled(effect)&&plateFor(effect)===key));
+ return PRINT_CHANNELS.filter(key=>project[side].effects.some(effect=>effectInProduction(effect)&&plateFor(effect)===key));
 }
 function canvasBlob(canvas:HTMLCanvasElement,format:'png'|'jpeg'){return new Promise<Blob>((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('无法生成图片，请降低分辨率后重试')),`image/${format}`,.94))}
 
-function ExportPanel({project,onClose,notify,open,onLocate,printEntry,onProduction}:{project:Project;onClose:()=>void;notify:(message:string)=>void;open:boolean;onLocate:(target:PreflightTarget)=>void;printEntry:number;onProduction:()=>void}){
- const [mode,setMode]=useState<ExportMode>('image'),[sides,setSides]=useState<SideName[]>(['front','back']),[dpi,setDpi]=useState(300),[format,setFormat]=useState<'png'|'jpeg'>('png'),[effects,setEffects]=useState(true);
+const FRONT_ONLY:SideName[]=['front'];
+const BOTH_FACES:SideName[]=['front','back'];
+
+function ExportPanel({project,onClose,notify,open,onLocate,printEntry,onProduction,onPlateProof,stillView}:{
+ project:Project;onClose:()=>void;notify:(message:string)=>void;open:boolean;onLocate:(target:PreflightTarget)=>void;
+ printEntry:number;onProduction:()=>void;onPlateProof:(applyFactory:boolean)=>void;stillView?:StillView
+}){
+ const [mode,setMode]=useState<ExportMode>('image'),[selectedSides,setSides]=useState<SideName[]>(BOTH_FACES),[dpi,setDpi]=useState(300),[format,setFormat]=useState<'png'|'jpeg'>('png'),[effects,setEffects]=useState(true);
+ const sides=project.singleSided?FRONT_ONLY:selectedSides;
+ const [useView,setUseView]=useState(false),[imageHeight,setImageHeight]=useState('');
+ const [imageBackground,setImageBackground]=useState<'view'|'white'|'dark'|'transparent'>('white');
  const [profile,setProfile]=useState<PrintProfile>('standard'),[job,setJob]=useState<JobState|null>(null),[grain,setGrain]=useState<'exclude'|'include'|'unset'>('unset');
+ const [route,setRoute]=useState<'factory'|'technical'>('factory');
  const [service,setService]=useState<'checking'|'online'|'offline'|'outdated'>('checking'),[busy,setBusy]=useState(false);
  const [serviceCheck,setServiceCheck]=useState(0);
+ const [deliveryVersions,setDeliveryVersions]=useState<number[]>([]);
+ const [selectedVersion,setSelectedVersion]=useState<number>();
+ const [backingUp,setBackingUp]=useState(false);
+ const factory=projectPrintProfile(project);
+ const applyFactory=route==='factory'&&Boolean(factory);
+ const raster=applyFactory&&isRasterProfile(project);
+ const printDpi=applyFactory?factory!.dpi:dpi;
+ const [checked,setChecked]=useState<{snapshot:Project;faces:SideName[];preset:PrintProfile;dpi:number;factory:boolean;issues:PreflightIssue[];error?:string}>();
+ const checkReady=checked?.snapshot===project&&checked.faces===sides&&checked.preset===profile&&checked.dpi===printDpi&&checked.factory===applyFactory;
+ const issues=checkReady&&checked?checked.issues:[];
  const abort=useRef<AbortController|null>(null);
+ useEffect(()=>{
+  if(!open||mode!=='project')return;
+  let active=true;
+  import('./browserProjects').then(store=>store.listDeliveryVersions(project.id))
+   .then(versions=>{if(active)setDeliveryVersions(versions)})
+   .catch(()=>{if(active)setDeliveryVersions([])});
+  return()=>{active=false};
+ },[open,mode,project.id,job?.file]);
+ const downloadDeliveryVersion=async(version:number, fallback?:Project)=>{
+  setBackingUp(true);
+  try {
+   const snapshot=fallback??await import('./browserProjects').then(store=>store.readDeliveryVersion(project.id,version));
+   if(!snapshot)throw new Error('这个交付版本暂时无法读取');
+   const file=await buildProjectArchive(snapshot);
+   downloadBlob(file,`${snapshot.name}-v${version}.cardproj`);
+  } catch(error){notify((error as Error).message)}
+  finally{setBackingUp(false)}
+ };
  useEffect(()=>{if(printEntry)setMode('print')},[printEntry]);
  useEffect(()=>{
-  if(!open||mode!=='print')return;
+  if(!stillView)return;
+  setMode('image');setSides([stillView.side]);setUseView(true);setImageBackground('view');
+ },[stillView]);
+ useEffect(()=>{
+  if(!open||mode!=='print'||raster)return;
   const c=new AbortController();
   setService('checking');
-  fetch('/api/health',{signal:c.signal}).then(async response=>{
-   const status=response.ok?await response.json():null;
-   if(!c.signal.aborted)setService(status?.productionOrder?'online':status?'outdated':'offline');
-  })
+  const checkService=browserRuntime
+   ? import('./browserPrint').then(({prepareBrowserPrint})=>prepareBrowserPrint(c.signal)).then(()=>'online' as const)
+   : fetch('/api/health',{signal:c.signal}).then(async response=>{
+    const status=response.ok?await response.json():null;
+    return status?.productionOrder?'online' as const:status?'outdated' as const:'offline' as const;
+   });
+  checkService.then(status=>{if(!c.signal.aborted)setService(status)})
    .catch(()=>{if(!c.signal.aborted)setService('offline')});
   return()=>c.abort();
- },[open,mode,serviceCheck]);
+ },[open,mode,serviceCheck,raster]);
+ useEffect(()=>{
+  if(!open||mode!=='print')return;
+  const controller=new AbortController();
+  const inputs={snapshot:project,faces:sides,preset:profile,dpi:printDpi,factory:applyFactory};
+  printPreflight(project,sides,profile,printDpi,controller.signal,applyFactory)
+   .then(issues=>{if(!controller.signal.aborted)setChecked({...inputs,issues});})
+   .catch(()=>{if(!controller.signal.aborted)setChecked({...inputs,issues:[],error:'无法完成预检，请重试'});});
+  return()=>controller.abort();
+ },[open,mode,project,sides,profile,printDpi,applyFactory,serviceCheck]);
  const hasGrain=reflectionCount(project,sides)>0;
- const issues:Array<{target:PreflightTarget;text:string;blocking:boolean}>=sides.flatMap(s=>{
-  const face=project[s];
-  const label=s==='front'?'正面':'背面';
-  return [
-   ...face.effects.filter(e=>processLayerEnabled(e)&&plateFor(e)&&!e.name.trim())
-    .map(e=>({target:{side:s,effectId:e.id},text:`${label}有工艺层缺少名称`,blocking:true})),
-   ...face.effects.filter(e=>processLayerEnabled(e)&&plateFor(e)&&e.maskContent?.length===0)
-    .map(e=>({target:{side:s,effectId:e.id},text:`${label}「${e.name}」的蒙版没有内容`,blocking:true})),
-   ...(!face.nodes.some(n=>n.visible&&n.type!=='empty')?[{target:{side:s},text:`${label}没有可见彩稿，将导出空白彩稿`,blocking:false}]:[]),
-   ...face.nodes.filter(n=>n.visible&&n.type==='image'&&!n.src).map(n=>({target:{side:s,nodeId:n.id},text:`${label}「${n.name}」缺少图片`,blocking:true})),
-   ...face.nodes.filter(n=>n.visible&&n.type==='text'&&isOutsidePrintSafeArea(n,project)).map(n=>({target:{side:s,nodeId:n.id},text:`${label}「${n.name}」超出正文安全区（内缩 ${PRINT_SAFE_MARGIN_MM} mm）`,blocking:false})),
-   ...face.effects.filter(e=>processLayerEnabled(e)&&!face.regions.some(r=>r.id===e.regionId)).map(e=>({target:{side:s,effectId:e.id},text:`${label}「${e.name}」缺少作用区域`,blocking:true})),
-   ...(getStockReflection(project)==='none'&&!['holo','silver'].includes(project.material)&&usedPlates(project,s).includes('white')?[{target:{side:s,material:true},text:`${label}在当前卡基上使用白墨，请与印厂确认覆盖率与附着条件`,blocking:false}]:[]),
-   ...(profile==='alternate'?face.effects.filter(e=>processLayerEnabled(e)&&plateFor(e)==='foil'&&face.regions.some(r=>r.id===e.regionId&&(r.kind==='paint'||r.strokes.length>0))).map(e=>({target:{side:s,effectId:e.id},text:`${label}「${e.name}」使用了笔刷区域。配置 B 的箔版要求几何轮廓`,blocking:true})):[])
-  ];
- });
- const names=SPOT_NAMES[profile];
+ const names=printSpotNames(project,profile,applyFactory);
  const allPlates=PRINT_CHANNELS.filter(key=>sides.some(s=>usedPlates(project,s).includes(key)));
  const order=productionSteps(project,project.production,sides);
  const run=async(request:ExportRequest)=>{
@@ -1533,29 +1726,39 @@ function ExportPanel({project,onClose,notify,open,onLocate,printEntry,onProducti
   const stem=request.project.name.replace(/[\\/:*?"<>|]/g,'_')||'卡牌';
   try {
    let file:Blob,name:string;
-   if(request.mode==='project'){progress('打包可编辑图层和原始素材',35);await exportProject(request.project);setJob({request,label:'项目包已下载',progress:100});notify('项目包已下载');return}
-   if(request.mode==='image'){
+   if(request.mode==='project'){
+    progress('打包可编辑图层和原始素材',35);
+    file=await buildProjectArchive(request.project);
+    name=`${stem}.cardproj`;
+   } else if(request.mode==='image'){
     const zip=new JSZip();let imageFile:Blob|null=null;
     for(const [index,face] of request.sides.entries()){
      progress(`渲染${face==='front'?'正面':'背面'}图片`,20+index*35);
-     const scale=request.dpi/254;
-     const canvas=await renderCard(request.project,face,{scale,effects:request.effects});
+     const canvas=await renderStill(request.project,face,{width:request.imageWidth,height:request.imageHeight,
+      effects:request.effects,view:request.view?.side===face?request.view:undefined,background:request.imageBackground});
      check();imageFile=await canvasBlob(canvas,request.format);zip.file(`${face}.${request.format==='jpeg'?'jpg':'png'}`,imageFile);
     }
     file=request.sides.length===1?imageFile!:await zip.generateAsync({type:'blob'});
-    name=request.sides.length===1?`${stem}-${request.sides[0]}.${request.format==='jpeg'?'jpg':'png'}`:`${stem}-数字卡图.zip`;
+    name=request.sides.length===1?`${stem}-v${request.project.version}-${request.sides[0]}.${request.format==='jpeg'?'jpg':'png'}`:`${stem}-v${request.project.version}-数字卡图.zip`;
+   } else if(request.applyFactory&&isRasterProfile(request.project)){
+    progress('生成含出血的厂规主图',30);
+    file=await exportFactoryRaster(request.project,request.sides,controller.signal,request.issues,request.includeGrain);
+    name=`${stem}-v${request.project.version}-交稿图片.zip`;
    } else {
+    const outputProfile=request.applyFactory?projectPrintProfile(request.project):undefined;
     const pages=[];
     for(const [index,face] of request.sides.entries()){
      progress(`生成${face==='front'?'正面':'背面'}彩稿与工艺版`,15+index*23);
-     const options={scale:request.dpi/254,bleed:true};
-     const printProject={...request.project,[face]:{...request.project[face],effects:request.project[face].effects.filter(e=>processKind(e)==='reflection'&&request.includeGrain)}};
-     const artwork=(await renderCard(printProject,face,{...options,effects:request.includeGrain,material:false})).toDataURL('image/png');
+     const options={scale:request.dpi/254,bleed:true,productionOnly:true};
+     const printEffects=request.includeGrain?request.project[face].effects
+      .filter(e=>effectInProduction(e)&&processKind(e)==='reflection').map(e=>({...e,visible:true})):[];
+     const printProject={...request.project,[face]:{...request.project[face],effects:printEffects}};
+     const artwork=orientPrintCanvas(await renderCard(printProject,face,{...options,effects:request.includeGrain,material:false}),face,outputProfile).toDataURL('image/png');
      const layers=[];
      for(const channel of PRINT_CHANNELS){
-      for(const entry of request.project[face].effects.filter(effect=>processLayerEnabled(effect)&&plateFor(effect)===channel)){
+      for(const entry of request.project[face].effects.filter(effect=>effectInProduction(effect)&&plateFor(effect)===channel)){
        check();
-       const mask = (await renderCard(request.project,face,{...options,plate:channel,layerId:entry.id})).toDataURL('image/png');
+       const mask=orientPrintCanvas(await renderCard(request.project,face,{...options,plate:channel,layerId:entry.id}),face,outputProfile).toDataURL('image/png');
        layers.push({id:entry.id,name:entry.name,channel,variant:entry.type,regionId:entry.regionId,mask});
       }
      }
@@ -1564,26 +1767,57 @@ function ExportPanel({project,onClose,notify,open,onLocate,printEntry,onProducti
     progress('生成 PDF、TIFF 并核对版面',70);
     const {id,name:projectName,version,widthMm,heightMm,bleedMm,material}=request.project;
     const production=request.project.production;
-    const job={...production,dieShape:production?.dieShape??'card',cornerRadiusMm:getCardCornerRadiusMm(request.project),
+    const job={...production,printProfile:request.applyFactory?production?.printProfile:undefined,
+     dieShape:production?.dieShape??'card',cornerRadiusMm:getCardCornerRadiusMm(request.project),
      flashTreatment:request.includeGrain?'artwork':reflectionCount(request.project,request.sides)?'preview':'unused',
      steps:productionSteps(request.project,production,request.sides)};
-    const response=await fetch('/api/export',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({project:{id,name:projectName,version,widthMm,heightMm,bleedMm,material:MATERIALS.find(m=>m.id===material)?.name||material,stockReflection:getStockReflection(request.project)},profile:request.profile,pages,production:job})});
-    if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data.error||'本机印前服务暂不可用，请启动服务后重试')}
-    file=await response.blob();name=`${stem}-v${request.project.version}-技术打样.zip`;
+    const payload={project:{id,name:projectName,version,widthMm,heightMm,bleedMm,
+     material:MATERIALS.find(m=>m.id===material)?.name||material,stockReflection:getStockReflection(request.project,request.sides[0]),
+     cardId:request.project.cardId,stockSpec:effectiveStockSpec(request.project),faceFinishes:stockDelivery(request.project,request.sides)},
+     profile:request.profile,pages,production:job,preflight:request.issues.map(({text,blocking})=>({text,blocking}))};
+    if(browserRuntime){
+     const {exportBrowserPrint}=await import('./browserPrint');
+     file=await exportBrowserPrint(payload,controller.signal);
+    }else{
+     const response=await fetch('/api/export',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+     if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data.error||'本机印前服务暂不可用，请启动服务后重试')}
+     file=await response.blob();
+    }
+    name=`${stem}-v${request.project.version}-技术打样.zip`;
    }
-   check();setJob({request,label:'文件已准备好',progress:100,file,name});downloadBlob(file,name);notify(`${request.mode==='print'?'印刷文件包':'数字卡图'}已下载`);
+   check();
+   let unrecorded=false;
+   if(request.mode!=='project'){
+    progress('保存交付版本',95);
+    try {await import('./browserProjects').then(store=>store.recordDeliveryVersion(request.project))}
+    catch {unrecorded=true}
+   }
+   check();setJob({request,label:'文件已准备好',progress:100,file,name,unrecorded});
+   downloadBlob(file,name);notify(`${request.mode==='print'?'印刷文件包':request.mode==='image'?'数字卡图':'项目包'}已下载`);
   } catch(error){setJob({request,label:controller.signal.aborted?'导出已取消':'导出失败',progress:0,error:controller.signal.aborted?'可以重试相同版本。':(error as Error).message})}
   finally{if(abort.current===controller){abort.current=null;setBusy(false)}}
  };
  if(!open)return null;
- const pixel=(mm:number)=>Math.round((mm+(mode==='print'?project.bleedMm*2:0))*dpi/25.4);
- const start=()=>void run({mode,project:structuredClone(project),sides:[...sides],dpi,format,effects,profile,includeGrain:grain==='include'});
+ const pixel=(mm:number)=>Math.round((mm+(mode==='print'?project.bleedMm*2:0))*(mode==='print'?printDpi:dpi)/25.4);
+ const outputHeight=imageHeight===''?pixel(project.heightMm):+imageHeight;
+ const outputWidth=Math.round(outputHeight*project.widthMm/project.heightMm);
+ const validPixels=Number.isInteger(outputHeight)&&outputHeight>=64&&outputHeight<=8192&&outputWidth>=1&&outputWidth<=8192&&outputWidth*outputHeight<=32_000_000;
+ const background=imageBackground==='view'?stillView?.background??'#ffffff'
+  :imageBackground==='dark'?'#262626':imageBackground==='transparent'&&format==='png'?'transparent':'#ffffff';
+ const start=()=>void run({mode,project:structuredClone(project),sides:[...sides],dpi:mode==='print'?printDpi:dpi,format,effects,profile,
+  includeGrain:grain==='include',applyFactory,imageWidth:outputWidth,imageHeight:outputHeight,imageBackground:background,
+  view:useView?stillView:undefined,issues});
  const blockers=issues.filter(issue=>issue.blocking);
  const notes=issues.filter(issue=>!issue.blocking);
  const grainRequired=hasGrain&&grain==='unset';
- const blocked=mode==='print'&&(service!=='online'||!!blockers.length||grainRequired);
- const printMessage=service==='checking'?'正在检查本机印前服务':service==='offline'?'本机印前服务未连接':service==='outdated'?'请重启 Prism 以加载新版印前服务':
-  blockers.length?`先处理 ${blockers.length} 项阻塞问题`:grainRequired?'请先选择局部闪光的生产处理方式':'用于打样和印厂核对';
+ const failedCheck=checkReady?checked?.error:undefined;
+ const blocked=mode==='print'?((!raster&&service!=='online')||!checkReady||Boolean(failedCheck)||!!blockers.length||grainRequired):mode==='image'&&!validPixels;
+ const serviceStatus=browserRuntime
+  ? {online:'浏览器印前引擎已就绪',checking:'正在加载浏览器印前引擎',offline:'印前引擎加载失败',outdated:'请刷新后重试'}[service]
+  : {online:'本机印前服务在线',checking:'正在连接本机印前服务',offline:'本机印前服务未连接',outdated:'请重启 Prism 以加载新版印前服务'}[service];
+ const scope=profileOutputScope(applyFactory?project:{...project,production:undefined});
+ const printMessage=(!raster&&service!=='online')?serviceStatus:failedCheck||(!checkReady?'正在预检':null)||
+  (blockers.length?`先处理 ${blockers.length} 项阻塞问题`:grainRequired?'请先选择局部闪光的生产处理方式':raster?'按厂规交付主图':'用于打样和印厂核对');
  return <Modal title="导出卡牌" onClose={onClose} drawer>
   <div className="export-context"><strong>{project.name}</strong><span>{project.widthMm} × {project.heightMm} mm · v{project.version}</span></div>
   <div className="export-tabs" aria-label="导出用途">
@@ -1593,28 +1827,70 @@ function ExportPanel({project,onClose,notify,open,onLocate,printEntry,onProducti
   <div className="export-layout">
   <div className="export-setup">
    <div className="section-heading">导出设置</div>
-   {mode!=='project'&&<><label className="field">导出卡面<select value={sides.length===2?'both':sides[0]} onChange={e=>setSides(e.target.value==='both'?['front','back']:[e.target.value as SideName])}><option value="both">正反两面</option><option value="front">仅正面</option><option value="back">仅背面</option></select></label><div className="field-grid"><label className="field">{mode==='print'?'输出配置':'文件格式'}{mode==='print'?<select value={profile} onChange={e=>setProfile(e.target.value as PrintProfile)}><option value="standard">技术配置 A</option><option value="alternate">技术配置 B</option></select>:<select value={format} onChange={e=>setFormat(e.target.value as 'png'|'jpeg')}><option value="png">PNG</option><option value="jpeg">JPEG</option></select>}</label><label className="field">分辨率<select value={dpi} onChange={e=>setDpi(+e.target.value)}><option value={300}>300 ppi</option><option value={600}>600 ppi</option></select></label></div><p className="micro-copy">每面 {pixel(project.widthMm)} × {pixel(project.heightMm)} px{mode==='print'? ' · 含出血':''}</p></>}
-   {mode==='image'&&<label className="check-field"><input type="checkbox" checked={effects} onChange={e=>setEffects(e.target.checked)}/>包含材质效果示意</label>}
-   {mode==='print'&&<>
-    <div className="print-status" role="status"><span className={`status-dot ${service==='online'?'':'warning'}`}/>
-     {service==='online'?'本机印前服务在线':service==='checking'?'正在连接本机印前服务':service==='outdated'?'请重启 Prism 以加载新版印前服务':'本机印前服务未连接'}
-     {['offline','outdated'].includes(service)&&<button className="text-button" onClick={()=>setServiceCheck(n=>n+1)}>重新检查</button>}
+   {mode!=='project'&&<label className="field">导出卡面<select value={sides.length===2?'both':sides[0]}
+    onChange={e=>setSides(e.target.value==='both'?['front','back']:[e.target.value as SideName])}>
+    {!project.singleSided&&<option value="both">正反两面</option>}<option value="front">仅正面</option>{!project.singleSided&&<option value="back">仅背面</option>}
+   </select></label>}
+   {mode==='print'&&factory&&<label className="field">交稿方式<select value={route} onChange={e=>setRoute(e.target.value as typeof route)}>
+    <option value="factory">{factory.product||'当前厂规'}</option><option value="technical">通用技术打样</option>
+   </select></label>}
+   {mode!=='project'&&<div className="field-grid">
+    {mode==='image'?<label className="field">文件格式<select value={format} onChange={e=>setFormat(e.target.value as 'png'|'jpeg')}>
+     <option value="png">PNG</option><option value="jpeg">JPEG</option>
+    </select></label>:applyFactory?<label className="field">输出配置<input readOnly value={raster?factory!.rasterFormat.toUpperCase():'PDF／TIFF'}/></label>
+     :<label className="field">输出配置<select value={profile} onChange={e=>setProfile(e.target.value as PrintProfile)}>
+      <option value="standard">技术配置 A</option><option value="alternate">技术配置 B</option>
+     </select></label>}
+    {mode==='print'&&applyFactory?<label className="field">分辨率<input readOnly value={printDpi+' ppi'}/></label>
+     :<label className="field">分辨率<select value={dpi} onChange={e=>{setDpi(+e.target.value);if(mode==='image')setImageHeight('')}}>
+      <option value={300}>300 ppi</option><option value={600}>600 ppi</option>
+     </select></label>}
+   </div>}
+   {mode==='print'&&<p className="micro-copy">每面 {pixel(project.widthMm)} × {pixel(project.heightMm)} px · 含出血</p>}
+   {mode==='image'&&<>
+    {stillView&&<label className="field">渲染视角<select value={useView?'current':'flat'} onChange={event=>setUseView(event.target.value==='current')}>
+     <option value="flat">平视</option><option value="current">当前预览视角</option>
+    </select></label>}
+    <div className="field-grid">
+     <label className="field">画面高度（px）<input type="number" min="64" max="8192" step="1" placeholder={String(pixel(project.heightMm))}
+      value={imageHeight} onChange={event=>setImageHeight(event.target.value)} aria-invalid={!validPixels}/></label>
+     <label className="field">背景<select value={format==='jpeg'&&imageBackground==='transparent'?'white':imageBackground}
+      onChange={event=>setImageBackground(event.target.value as typeof imageBackground)}>
+      {stillView&&<option value="view">预览背景</option>}<option value="white">白色</option><option value="dark">深灰</option>
+      {format==='png'&&<option value="transparent">透明</option>}
+     </select></label>
     </div>
+    {validPixels?<p className="micro-copy">{outputWidth} × {outputHeight} px</p>:<p className="micro-copy">高度须在 64–8192 px，宽度不得超过 8192 px，总计不超过 3200 万像素。</p>}
+    <label className="check-field"><input type="checkbox" checked={effects} onChange={e=>setEffects(e.target.checked)}/>包含材质效果示意</label>
+   </>}
+   {mode==='print'&&<>
+    {!raster&&<div className="print-status" role="status"><span className={`status-dot ${service==='online'?'':'warning'}`}/>
+     {serviceStatus}
+     {['offline','outdated'].includes(service)&&<button className="text-button" onClick={()=>setServiceCheck(n=>n+1)}>重新检查</button>}
+    </div>}
     {hasGrain&&<label className="field">局部闪光的生产处理<select value={grain} onChange={e=>setGrain(e.target.value as typeof grain)}>
      <option value="unset">选择处理方式</option><option value="exclude">从生产彩稿排除</option><option value="include">将图案印为彩色图文</option>
     </select></label>}
    </>}
    {mode==='project'&&<p className="micro-copy">备份包括正反面图层、区域、工艺设置与原素材。可从「我的卡牌」重新打开 .cardproj。</p>}
+   {mode==='project'&&deliveryVersions.length>0&&<div className="delivery-version">
+    <label className="field">交付版本<select value={selectedVersion??deliveryVersions[0]} onChange={event=>setSelectedVersion(+event.target.value)}>
+     {deliveryVersions.map(version=><option key={version} value={version}>v{version}</option>)}
+    </select></label>
+    <Button disabled={backingUp} onClick={()=>void downloadDeliveryVersion(selectedVersion??deliveryVersions[0])}>下载该版本工程</Button>
+   </div>}
   </div>
   <div className="export-details"><div className="section-heading">{mode==='print'?'印前检查':'文件内容'} <small>v{project.version}</small></div>
    {mode==='image'&&<div className="export-thumbnails">{sides.map(face=><div key={face}><CardThumb project={project} side={face} effects={effects}/><span>{face==='front'?'正面':'背面'}</span></div>)}</div>}
    {mode==='project'&&<ul className="file-list"><li><Check size={14}/>可编辑项目文档</li><li><Check size={14}/>图层素材与区域</li><li><Check size={14}/>校验清单</li></ul>}
    {mode==='print'&&<>
-    <p className="print-scope"><strong>技术打样</strong><span>通用 CMYK 彩稿与工艺分版。正式生产需由印厂确认色彩配置、交稿标准和样品。</span></p>
+    <p className="print-scope"><strong>{scope.title}</strong><span>{scope.description}</span></p>
     <div className="production-spec"><div><b>生产工艺单 · {order.length} 道</b><small>{DIE_SHAPES[project.production?.dieShape??'card']}</small></div>
-      <Button onClick={onProduction}>查看工艺顺序</Button></div>
+     <div className="inline-actions"><Button onClick={()=>onPlateProof(applyFactory)}>分版核稿</Button><Button onClick={onProduction}>查看工艺顺序</Button></div></div>
     <div className="preflight">
-     {issues.length ? <>
+     {failedCheck?<div role="status">{failedCheck} <button className="text-button" onClick={()=>setServiceCheck(n=>n+1)}>重新预检</button></div>
+     :!checkReady?<div role="status">正在预检</div>
+     :issues.length ? <>
       <p className="preflight-count">{blockers.length} 项需修正 · {notes.length} 项提醒</p>
       {[...blockers,...notes].map((issue,index)=><button key={index} className={issue.blocking?'blocking':''} onClick={()=>onLocate(issue.target)}>
        <AlertTriangle size={15}/><span>{issue.text}</span><ArrowUpRight size={12}/>
@@ -1622,13 +1898,17 @@ function ExportPanel({project,onClose,notify,open,onLocate,printEntry,onProducti
      </> : <span className="preflight-good"><CheckCircle2 size={16}/>当前设计通过基础规则检查</span>}
     </div>
     <div className="section-heading export-file-heading">输出文件</div>
-    <ul className="file-list"><li>CMYK 彩稿 <small>artwork.pdf</small></li><li>彩稿与专色合版 <small>composite.pdf</small></li>
+    {raster?<ul className="file-list">
+     {sides.map(face=><li key={face}>{face==='front'?'正面主图':'背面主图'} <small>{face}.{factory!.rasterFormat==='jpeg'?'jpg':'png'}</small></li>)}
+     <li>导出规格及预检清单</li>
+    </ul>:<ul className="file-list"><li>CMYK 彩稿 <small>artwork.pdf</small></li><li>彩稿与专色合版 <small>composite.pdf</small></li>
      {allPlates.map(key=><li key={key}>{PLATE_LABELS[key]} <small>{names[key]} · PDF / TIFF</small></li>)}
      <li>独立工艺层 PDF / TIFF <small>layers/</small></li><li>矢量刀模 <small>die.pdf / die.svg</small></li><li>预检报告、排序工艺单、校验清单</li>
-    </ul>
+    </ul>}
    </>}
   </div></div>
   {job&&<div className="job-status" aria-live="polite"><div><strong>{job.label}</strong><span>项目 v{job.request.project.version}{job.request.project.version!==project.version?' · 历史快照':''}</span>{job.error&&<p>{job.error}</p>}</div>{busy?<><progress value={job.progress} max={100}/><Button onClick={()=>abort.current?.abort()}>取消任务</Button></>:job.file?<Button onClick={()=>downloadBlob(job.file!,job.name!)}>再次下载</Button>:job.error?<Button onClick={()=>void run(job.request)}>重试此版本</Button>:null}</div>}
-  <div className="modal-footer"><span>{busy?'关闭窗口后任务继续，回来可查看进度。':mode==='print'?printMessage:mode==='project'?'可再次打开并继续编辑':'文件保存到你的设备'}</span><Button className="primary" disabled={busy||blocked} onClick={start}>{busy?<Loader2 className="spin" size={16}/>:<Download size={16}/>} {mode==='image'?'下载图片':mode==='print'?'生成技术打样包':'下载项目包'}</Button></div>
+  {job?.unrecorded&&<div className="job-status"><div>无法保存交付版本到浏览器</div><Button disabled={backingUp} onClick={()=>void downloadDeliveryVersion(job.request.project.version,job.request.project)}>下载该版本工程</Button></div>}
+  <div className="modal-footer"><span>{busy?'关闭窗口后任务继续，回来可查看进度。':mode==='print'?printMessage:mode==='project'?'可再次打开并继续编辑':'文件保存到你的设备'}</span><Button className="primary" disabled={busy||blocked} onClick={start}>{busy?<Loader2 className="spin" size={16}/>:<Download size={16}/>} {mode==='image'?'下载图片':mode==='print'?(raster?'生成交稿图片':'生成技术打样包'):'下载项目包'}</Button></div>
  </Modal>;
 }

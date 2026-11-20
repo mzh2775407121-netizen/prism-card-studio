@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, LocateFixed, Plus, Scissors, Trash2 } from 'lucide-react';
 import { getStockReflection, STOCK_REFLECTIONS, uid, type Project } from './model';
+import PrintProfileEditor from './PrintProfileEditor';
 import { DIE_SHAPES, EMPTY_PLAN, FACE_LABELS, MANUAL_OPERATIONS, PLATE_LABELS, dieBounds, productionSteps, reflectionCount,
   type DieShape, type ManualOperation, type ProductionFace, type ProductionPlan, type ProductionStep } from './production';
 import './production-plan.css';
@@ -28,8 +29,12 @@ export default function ProductionPlanEditor({ project, material, initialTab, on
   const row = rows.find(item => item.id === selected);
   const flashes = reflectionCount(project);
   const update = (patch: Partial<ProductionPlan>, key?: string) => onChange({ ...plan, ...patch }, key);
-  const saveRows = (change: ProductionStep[], key?: string) => update({ steps: change.map(({ id, kind, face, name, layerId, method, note }) =>
-    ({ id, kind, face, name, layerId, method, note })) }, key);
+  const saveRows = (change: ProductionStep[], key?: string) => {
+    const steps = project.singleSided ? [...change, ...plan.steps.filter(step => step.face === 'back')] : change;
+    const ids = new Set(steps.map(step => step.id));
+    update({ steps: steps.map(({ id, kind, face, name, layerId, method, note, materialCode, requiresStepId }) =>
+      ({ id, kind, face, name, layerId, method, note, materialCode, requiresStepId: requiresStepId && ids.has(requiresStepId) ? requiresStepId : undefined })) }, key);
+  };
   const edit = (patch: Partial<ProductionStep>, field: string) => {
     if (row) saveRows(rows.map(step => step.id === row.id ? { ...step, ...patch } : step), `production:${row.id}:${field}`);
   };
@@ -57,11 +62,14 @@ export default function ProductionPlanEditor({ project, material, initialTab, on
     </nav>
     <div className="production-body">
       {tab === 'spec' ? <>
+        <PrintProfileEditor project={project} profile={plan.printProfile} onChange={(printProfile, key) => update({ printProfile }, key)}
+          onLoadTemplate={(printProfile, printer) => update({ printProfile, printer, stockCode: plan.printer === printer ? plan.stockCode : undefined })}/>
         <section className="production-section">
           <h3>卡牌规格</h3>
           <div className="production-spec"><div><b>{project.widthMm} × {project.heightMm} mm</b><small>出血 {project.bleedMm} mm · 圆角 {dieBounds(project, 'card').radius} mm</small></div>
             <button className="button" onClick={onSize}>调整尺寸</button></div>
-          <div className="production-spec"><div><b>{material}</b><small>{STOCK_REFLECTIONS[getStockReflection(project)]}</small></div>
+          <div className="production-spec"><div><b>{material}</b><small>正面 {STOCK_REFLECTIONS[getStockReflection(project,'front')]}
+            {!project.singleSided&&' · 背面 '+STOCK_REFLECTIONS[getStockReflection(project,'back')]}</small></div>
             <button className="button" onClick={onStock}>更换基材</button></div>
           <div className="field-grid"><label className="field">印厂<input value={plan.printer ?? ''} maxLength={120} placeholder="选填" onChange={e => update({ printer: e.target.value }, 'production:printer')}/></label>
             <label className="field">实际材料或供应商料号<input value={plan.stockCode ?? ''} maxLength={120} placeholder="选填" onChange={e => update({ stockCode: e.target.value }, 'production:stock')}/></label></div>
@@ -100,7 +108,17 @@ export default function ProductionPlanEditor({ project, material, initialTab, on
             </div>
             {manual && <div className="field-grid"><label className="field">工序名称<input value={row.name} maxLength={100} onChange={e => edit({ name: e.target.value }, 'name')}/></label>
               <label className="field">加工面<select value={row.face} onChange={e => edit({ face: e.target.value as ProductionFace }, 'face')}>
-                {Object.entries(FACE_LABELS).map(([value, title]) => <option key={value} value={value}>{title}</option>)}</select></label></div>}
+                {Object.entries(FACE_LABELS).filter(([value]) => value !== 'back' || !project.singleSided)
+                  .map(([value, title]) => <option key={value} value={value}>{title}</option>)}</select></label></div>}
+            <div className="field-grid">
+              <label className="field">工艺物料编号<input value={row.materialCode ?? ''} maxLength={120}
+                onChange={event => edit({ materialCode: event.target.value }, 'materialCode')}/></label>
+              <label className="field">前置工序<select value={row.requiresStepId ?? ''} onChange={event => edit({ requiresStepId: event.target.value || undefined }, 'requiresStepId')}>
+                <option value="">无</option>
+                {rows.filter(step => step.id !== row.id && (step.face === row.face || step.face === 'both'))
+                  .map(step => <option key={step.id} value={step.id}>{FACE_LABELS[step.face]} · {step.name}</option>)}
+              </select></label>
+            </div>
             <label className="field">做法或材料<input value={row.method ?? ''} maxLength={120} placeholder={row.kind === 'artwork' ? '如背面反印，镜像由印厂处理' : '如指定箔材编号、专色色号或膜材'} onChange={e => edit({ method: e.target.value }, 'method')}/></label>
             <label className="field">本工序备注<textarea rows={2} maxLength={600} value={row.note ?? ''} placeholder="补充套准、覆盖率、加工要求" onChange={e => edit({ note: e.target.value }, 'note')}/></label>
           </div>}

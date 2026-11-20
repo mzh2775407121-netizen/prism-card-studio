@@ -14,7 +14,7 @@
 .design-inspector > .right-scroll { padding: 0; }
 .design-inspector > .right-bottom { border-color: var(--inspector-line); }
 .inspector-layer-name {
-  flex: 1; width: 0; min-width: 0; padding: 3px 0; border: 0; border-radius: 4px;
+  flex: 1; width: 0; min-width: 0; padding: 3px 0; border: 0; border-radius: var(--radius-compact); corner-shape: var(--prism-corner);
   background: transparent; color: inherit; font-size: 14px; font-weight: 600; text-overflow: ellipsis;
 }
 .inspector-layer-name:not(:disabled):hover { background: var(--inspector-field); }
@@ -47,7 +47,7 @@
 .style-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
 .style-fields.style-rotation { grid-template-columns: minmax(0,1.12fr) minmax(0,1fr); }
 .style-number {
-  display: flex; align-items: center; min-width: 0; height: 24px; border: 0; border-radius: 5px;
+  display: flex; align-items: center; min-width: 0; height: 24px; border: 0; border-radius: var(--radius-control); corner-shape: var(--prism-corner);
   background: var(--inspector-field); color: var(--inspector-muted, #696969); font-size: 11px;
 }
 .design-inspector .style-number { height: 27px; }
@@ -69,24 +69,25 @@
 }
 .style-number input:focus-visible,.style-hex:focus-visible { outline: none; }
 .style-unit { padding-right: 6px; white-space: nowrap; font-size: 10px; }
-.style-segmented { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 1px; overflow: hidden; border-radius: 5px; }
+.style-segmented { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 1px; overflow: hidden; border-radius: var(--radius-control); corner-shape: var(--prism-corner); }
 .style-segmented .style-icon { width: 100%; border-radius: 0; background: var(--inspector-field); color: var(--inspector-muted); }
 .style-segmented .style-icon:not(:disabled):hover { background: var(--inspector-hover); color: var(--inspector-text); }
 .style-segmented .style-icon:focus-visible { outline-offset: -2px; }
 .style-rotation .style-icon[aria-pressed="true"] { background: var(--inspector-focus); }
 .style-icon {
-  position: relative; width: 24px; height: 24px; flex: 0 0 24px; padding: 0; border-radius: 5px;
+  position: relative; width: 24px; height: 24px; flex: 0 0 24px; padding: 0; border-radius: var(--radius-control); corner-shape: var(--prism-corner);
   display: grid; place-items: center; color: var(--inspector-text, #303030);
 }
 .style-icon:not(:disabled):hover { background: var(--inspector-hover); }
 .style-icon[aria-pressed="true"] { color: var(--inspector-focus); background: var(--prism-selected-surface); }
 .style-color-control {
   display: flex; align-items: center; min-width: 0; height: 24px; padding: 2px 3px;
-  background: var(--inspector-field); border-radius: 5px;
+  background: var(--inspector-field); border-radius: var(--radius-control); corner-shape: var(--prism-corner);
 }
 .style-color-swatch {
   width: 18px; height: 18px; flex: 0 0 18px; overflow: hidden; position: relative; cursor: pointer;
-  border-radius: 3px; border: 1px solid #20202021;
+  border-radius: var(--radius-compact);
+  corner-shape: var(--prism-corner); border: 1px solid #20202021;
   background: repeating-conic-gradient(#ddd 0 25%, #fff 0 50%) 0 0/10px 10px;
 }
 .style-color-swatch::before { content: ""; inset: 0; position: absolute; background: var(--swatch); pointer-events: none; }
@@ -97,11 +98,11 @@
 .paint-value-row > .style-icon { width: 26px; }
 .paint-value {
   display: grid; grid-template-columns: minmax(0,1fr) 48px; align-items: center;
-  background: var(--inspector-field); border-radius: 5px;
+  background: var(--inspector-field); border-radius: var(--radius-control); corner-shape: var(--prism-corner);
 }
-.paint-value > .style-number { border-left: 1px solid var(--inspector-line); border-radius: 0 5px 5px 0; }
+.paint-value > .style-number { border-left: 1px solid var(--inspector-line); border-radius: 0 var(--radius-control) var(--radius-control) 0; corner-shape: var(--prism-corner); }
 .paint-value > .style-number input { text-align: right; }
-.design-inspector .fill-summary { color: var(--inspector-text); font-size: 12px; height: 27px; border-radius: 5px 0 0 5px; }
+.design-inspector .fill-summary { color: var(--inspector-text); font-size: 12px; height: 27px; border-radius: var(--radius-control) 0 0 var(--radius-control); corner-shape: var(--prism-corner); }
 .style-stroke-section > .style-section-body { gap: 7px; margin-top: 10px; }
 .style-stroke-section .style-color-control { height: 27px; padding-inline: 5px; }
 .style-stroke-section .style-color-swatch { width: 16px; height: 16px; flex-basis: 16px; }
@@ -112,22 +113,24 @@
 .style-typography .style-caption { font-size: 10px; line-height: 16px; }
 .style-typography .type-menu {
   box-sizing: border-box; min-height: 26px; padding: 4px 8px; border: 1px solid var(--inspector-hover);
-  border-radius: 4px; background: var(--editor-panel); font-size: 11px; line-height: 16px;
+  border-radius: var(--radius-compact);
+  corner-shape: var(--prism-corner); background: var(--editor-panel); font-size: 11px; line-height: 16px;
 }
 .type-size {
   display: flex; align-items: center; min-width: 0; align-self: center;
-  border-radius: 4px; background: #383838;
+  border-radius: var(--radius-compact);
+  corner-shape: var(--prism-corner); background: #383838;
 }
 .style-typography .type-size .style-number { flex: 1; }
-.style-typography .style-number { height: 24px; border-radius: 4px; background: #383838; }
+.style-typography .style-number { height: 24px; border-radius: var(--radius-compact); corner-shape: var(--prism-corner); background: #383838; }
 .style-typography .style-number input { padding-inline-start: 4px; font-size: 11px; }
 .style-typography .type-size input { padding-inline-start: 8px; }
 .style-typography .type-size .type-size-menu[data-icon-only=true] {
-  border-left: 1px solid var(--inspector-hover); border-radius: 0 4px 4px 0;
+  border-left: 1px solid var(--inspector-hover); border-radius: 0 var(--radius-compact) var(--radius-compact) 0; corner-shape: var(--prism-corner);
 }
 .style-typography .style-scrub { padding-left: 6px; }
-.style-typography .style-segmented { gap: 0; padding: 1px; border-radius: 4px; background: #383838; }
-.style-typography .style-segmented .style-icon { height: 22px; background: transparent; border-radius: 3px; }
+.style-typography .style-segmented { gap: 0; padding: 1px; border-radius: var(--radius-compact); corner-shape: var(--prism-corner); background: #383838; }
+.style-typography .style-segmented .style-icon { height: 22px; background: transparent; border-radius: var(--radius-detail); corner-shape: var(--prism-corner); }
 .style-typography .style-segmented .style-icon[aria-pressed=true] { background: var(--editor-panel); }
 .style-typography .style-segmented .style-icon:hover:not(:disabled) { background: var(--inspector-hover); }
 .design-inspector .mask-actions { margin: 0; gap: 8px; }
@@ -140,11 +143,11 @@
 .gradient-editor { display: grid; gap: 6px; }
 .gradient-ramp {
   position: relative; background: repeating-conic-gradient(#e0e0e0 0 25%,#fff 0 50%) 0 0/10px 10px;
-  height: 18px; margin: 8px 8px 11px; border-radius: 4px; cursor: crosshair; touch-action: none;
+  height: 18px; margin: 8px 8px 11px; border-radius: var(--radius-compact); corner-shape: var(--prism-corner); cursor: crosshair; touch-action: none;
 }
-.gradient-spectrum { position: absolute; inset: 0; border: 1px solid #20202028; border-radius: inherit; pointer-events: none; }
+.gradient-spectrum { position: absolute; inset: 0; border: 1px solid #20202028; border-radius: inherit; corner-shape: inherit; pointer-events: none; }
 .gradient-stop {
-  position: absolute; top: 7px; width: 15px; height: 18px; padding: 0; border: 2px solid white; border-radius: 4px;
+  position: absolute; top: 7px; width: 15px; height: 18px; padding: 0; border: 2px solid white; border-radius: var(--radius-compact); corner-shape: var(--prism-corner);
   box-shadow: 0 0 0 1px #454545; transform: translateX(-50%); cursor: ew-resize; touch-action: none;
   background: linear-gradient(var(--swatch),var(--swatch)), repeating-conic-gradient(#e0e0e0 0 25%,#fff 0 50%) 0 0/8px 8px;
 }

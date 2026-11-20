@@ -1,4 +1,5 @@
-import { getCardCornerRadiusMm, plateFor, processKind, processLayerEnabled, type PrintChannel, type Project, type SideName } from './model';
+import { effectInProduction, getCardCornerRadiusMm, plateFor, processKind, type PrintChannel, type Project, type SideName } from './model';
+import type { PrintJobProfile } from './printProfiles';
 
 export const DIE_SHAPES = { card: '跟随卡牌圆角', rectangle: '直角矩形', ellipse: '椭圆' } as const;
 export type DieShape = keyof typeof DIE_SHAPES;
@@ -23,6 +24,8 @@ export interface ProductionStep {
   name: string;
   method?: string;
   note?: string;
+  materialCode?: string;
+  requiresStepId?: string;
 }
 export interface ProductionPlan {
   dieShape: DieShape;
@@ -30,6 +33,7 @@ export interface ProductionPlan {
   stockCode?: string;
   note?: string;
   steps: ProductionStep[];
+  printProfile?: PrintJobProfile;
 }
 export const EMPTY_PLAN: ProductionPlan = { dieShape: 'card', steps: [] };
 
@@ -38,12 +42,13 @@ const rank: Record<PrintChannel | 'artwork' | 'die', number> = {
 };
 type LinkedStep = ProductionStep & { channel?: PrintChannel };
 
-export function productionSteps(project: Project, plan = project.production ?? EMPTY_PLAN, faces: SideName[] = ['front', 'back']): LinkedStep[] {
+export function productionSteps(project: Project, plan = project.production ?? EMPTY_PLAN,
+  faces: SideName[] = project.singleSided ? ['front'] : ['front', 'back']): LinkedStep[] {
   const available: LinkedStep[] = (['front', 'back'] as const).flatMap(face => {
     const artwork: LinkedStep = { id: `${face}:artwork`, kind: 'artwork', face, name: '彩稿' };
     const layers = project[face].effects.flatMap<LinkedStep>(effect => {
       const channel = plateFor(effect);
-      return channel && processLayerEnabled(effect)
+      return channel && effectInProduction(effect)
         ? [{ id: `${face}:layer:${effect.id}`, kind: 'layer', face, layerId: effect.id, name: effect.name, channel }]
         : [];
     });
@@ -57,7 +62,7 @@ export function productionSteps(project: Project, plan = project.production ?? E
     const step = matches.get(saved.id);
     if (step) {
       matches.delete(saved.id);
-      return [{ ...step, method: saved.method, note: saved.note }];
+      return [{ ...step, method: saved.method, note: saved.note, materialCode: saved.materialCode, requiresStepId: saved.requiresStepId }];
     }
     return Object.hasOwn(MANUAL_OPERATIONS, saved.kind) ? [saved] : [];
   });
@@ -77,7 +82,7 @@ export function dieBounds(project: Pick<Project, 'widthMm' | 'heightMm' | 'corne
   };
 }
 
-export function reflectionCount(project: Project, faces: SideName[] = ['front', 'back']) {
+export function reflectionCount(project: Project, faces: SideName[] = project.singleSided ? ['front'] : ['front', 'back']) {
   return faces.reduce((count, face) => count + project[face].effects.filter(effect =>
-    processKind(effect) === 'reflection' && processLayerEnabled(effect)).length, 0);
+    processKind(effect) === 'reflection' && effectInProduction(effect)).length, 0);
 }

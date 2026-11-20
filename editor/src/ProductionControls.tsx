@@ -1,39 +1,166 @@
 import { useEffect, useRef, useState } from 'react';
 import { ImagePlus, Square, Type } from 'lucide-react';
-import { STOCK_REFLECTIONS, uid, type CardNode, type CardSide, type Effect, type Project, type Region, type StockReflection } from './model';
+import { getStockFinish, STOCK_REFLECTIONS, uid, type CardNode, type CardSide, type Effect, type Project, type Region,
+  type SideName, type StockFinish, type StockFinishMatch, type StockReflection, type StockSpec } from './model';
+import { STOCKS, STOCK_CORES, STOCK_FINISH_STYLES, STOCK_FINISH_METHODS, stockPreset, confirmedStockFinish,
+  isMetalFinish, isTransparentStock, stockFinishConflict, stockFinishHasPattern, needsStockFinishMatch, stockKeys } from './stockMaterials';
 import { LAYER_KINDS, type LayerKind } from './layers';
 import InspectorMenu from './InspectorMenu';
 import { readImage } from './io';
 import { makeCanvas, renderEffectMask } from './render';
 import './production-controls.css';
 
-export const STOCKS = [
-  {id:'matte',name:'哑光白卡',note:'白色不透底',color:'#e9e4da'},
-  {id:'black',name:'黑芯卡纸',note:'遮光夹层',color:'#535a56'},
-  {id:'silver',name:'金属银卡',note:'银色金属表面',color:'#b8bec2'},
-  {id:'holo',name:'镭射卡基',note:'镀铝基材与镭射纹样',color:'#bfd1cd'},
-];
-
-export function defaultStockReflection(material: string): StockReflection {
-  return material === 'silver' ? 'mirror' : material === 'holo' ? 'rainbow' : 'none';
-}
-
-export function StockPicker({material,reflection,onMaterial,onReflection}:{
-  material:string;reflection:StockReflection;onMaterial:(material:string)=>void;onReflection:(value:StockReflection)=>void;
+export function StockPicker({material,spec,onMaterial,onSpec,presetMeasurements=false}:{
+  material:string;spec:StockSpec;onMaterial:(material:string)=>void;onSpec:(spec:StockSpec)=>void; presetMeasurements?:boolean;
 }) {
-  const choices: StockReflection[] = ['matte','black'].includes(material) ? ['none'] : ['none','mirror','rainbow','radial'];
+  const stock = stockPreset(material);
+  const plastic = stock?.plastic === true;
+  const metric = plastic ? 'thicknessMm' : 'grammageGsm';
+  const label = plastic ? '片厚' : '克重';
+  const unit = plastic ? 'mm' : 'g/m²';
+  const measurements = plastic ? stock?.thicknesses : stock?.weights;
+  const measure = spec[metric];
+  const core = spec.core ?? (stock?.cores?.length === 1 ? stock.cores[0] : undefined);
+  const corePlaceholder = plastic ? '不适用' : '待确认';
   return <div className="stock-picker">
     <label className="field">卡基材料
       <span className="stock-select"><select value={material} onChange={event=>onMaterial(event.target.value)}>
+        {!stock&&<option value={material}>{material}</option>}
         {STOCKS.map(stock=><option key={stock.id} value={stock.id}>{stock.name} · {stock.note}</option>)}
       </select></span>
     </label>
-    <label className="field">底材反光
-      <span className="stock-select"><select value={reflection} onChange={event=>onReflection(event.target.value as StockReflection)}>
-        {choices.map(choice=><option value={choice} key={choice}>{STOCK_REFLECTIONS[choice]}</option>)}
-      </select></span>
-    </label>
+    <div className="stock-spec-fields">
+      {presetMeasurements?<label className="stock-measure stock-select stock-preset-field">
+        <span>{label}</span>
+        <span className="stock-preset-value" aria-hidden="true">
+          {measure?.toFixed(2)??'待确认'}
+          {measure!==undefined&&<span>{unit}</span>}
+        </span>
+        <select aria-label={label} value={measure??''} disabled={!measurements?.length}
+          onChange={event=>onSpec({...spec,[metric]:Number(event.target.value)})}>
+          {!measurements?.length&&<option value="">待确认</option>}
+          {measurements?.map(value=><option key={value} value={value}>{value.toFixed(2)} {unit}</option>)}
+        </select>
+      </label>:<label className="stock-measure">
+        <span>{label}</span><input key={material+':'+(spec[metric]??'')} type="number" aria-label={label}
+          defaultValue={spec[metric]} placeholder="待确认" min={plastic ? .01 : 1} max={plastic ? 10 : 2000} step="any"
+          onBlur={event=>{
+            const field=event.currentTarget;
+            if(!field.validity.valid){field.value=String(spec[metric]??'');return}
+            const value=field.value===''?undefined:field.valueAsNumber;
+            if(value!==spec[metric])onSpec({...spec,[metric]:value});
+          }} onKeyDown={event=>{
+            if(event.key==='Enter'){event.preventDefault();event.currentTarget.blur()}
+          }}/><span aria-hidden="true">{unit}</span>
+      </label>}
+      <label className={`stock-measure stock-select stock-core${presetMeasurements?' stock-preset-field':''}`}>
+        <span>选配</span>
+        {presetMeasurements&&<span className="stock-preset-value" aria-hidden="true">{core?STOCK_CORES[core]:corePlaceholder}</span>}
+        <select aria-label="选配芯层" value={core??''} disabled={!stock?.cores||stock.cores.length===1}
+          onChange={event=>onSpec({...spec,core:(event.target.value||undefined) as StockSpec['core']})}>
+          <option value="">{corePlaceholder}</option>
+          {stock?.cores?.map(core=><option key={core} value={core}>{STOCK_CORES[core]}</option>)}
+          {spec.core&&!stock?.cores?.includes(spec.core)&&<option value={spec.core}>{STOCK_CORES[spec.core]}</option>}
+        </select>
+      </label>
+    </div>
   </div>;
+}
+
+export function StockFinishControls({project,side,onSide,onChange,onMatch}:{
+  project:Project;side:SideName;onSide:(side:SideName)=>void;
+  onChange:(finish:StockFinish,continuous?:boolean)=>void;onMatch:()=>void;
+}) {
+  const finish = getStockFinish(project,side);
+  const match = confirmedStockFinish(project,side);
+  const choices = finish.style==='radial' ? [...STOCK_FINISH_STYLES,'radial' as const] : STOCK_FINISH_STYLES;
+  const pending = needsStockFinishMatch(project,side);
+  const clearStock = isTransparentStock(project.material);
+  const affectsTransparency = clearStock && finish.style!=='none' &&
+    (isMetalFinish(finish.style)||match?.transparent===false);
+  return <div className="stock-finish">
+    <div className="section-heading">底材反光</div>
+    {!project.singleSided&&<div className="stock-face-tabs" role="group" aria-label="反光卡面">
+      {(['front','back'] as const).map(face=><button type="button" key={face} aria-pressed={face===side}
+        onClick={()=>onSide(face)}>{face==='front'?'正面':'背面'}</button>)}
+    </div>}
+    <label className="field">反光样式<span className="stock-select"><select value={finish.style} onChange={event=>{
+      const style=event.target.value as StockReflection;
+      if(style!==finish.style)onChange({...finish,style,match:undefined,reviewRequired:finish.reviewRequired||!!finish.match||undefined});
+    }}>
+      {choices.map(choice=><option value={choice} key={choice}>
+        {STOCK_REFLECTIONS[choice]}{clearStock&&isMetalFinish(choice)?' · 不透光':''}
+      </option>)}
+    </select></span></label>
+    {finish.style!=='none'&&<>
+      <label className="check-field"><input type="checkbox" checked={finish.visible!==false}
+        onChange={event=>onChange({...finish,visible:event.target.checked})}/>显示反光预览</label>
+      <label className="range-field"><span>预览透明度<b>{Math.round(finish.opacity*100)}%</b></span>
+        <input aria-label="预览透明度" type="range" min={0} max={100} value={Math.round(finish.opacity*100)}
+          onChange={event=>onChange({...finish,opacity:Number(event.target.value)/100},true)}/>
+      </label>
+    </>}
+    {affectsTransparency&&<p className="stock-finish-message">不透明反光覆盖的区域会失去透光效果。保留透光时，请匹配透明镭射膜。</p>}
+    {(pending||match)&&<div className="stock-match-row">
+      <span>{pending?'待印厂确认':'已匹配用料'}{match&&<small>{match.materialCode}{match.patternCode?' · '+match.patternCode:''}</small>}</span>
+      <button type="button" className="button" onClick={onMatch}>{match?'编辑匹配':finish.style==='none'?'确认无反光':'匹配用料'}</button>
+    </div>}
+  </div>;
+}
+
+export function StockFinishMatchForm({project,side,onApply,onClose,onPlan}:{
+  project:Project;side:SideName;onApply:(match?:StockFinishMatch)=>void;onClose:()=>void;onPlan:()=>void;
+}) {
+  const {style}=getStockFinish(project,side);
+  const existing=confirmedStockFinish(project,side);
+  const keys=stockKeys(project);
+  const [materialCode,setMaterialCode]=useState(existing?.materialCode??'');
+  const [patternCode,setPatternCode]=useState(existing?.patternCode??'');
+  const [orientation,setOrientation]=useState(String(existing?.orientationDeg??0));
+  const [method,setMethod]=useState<StockFinishMatch['method']>(existing?.method??'composite');
+  const [transparent,setTransparent]=useState(existing?.transparent??(isTransparentStock(project.material)&&!isMetalFinish(style)));
+  const [acknowledged,setAcknowledged]=useState(Boolean(existing));
+  const conflict=stockFinishConflict(style,{transparent});
+  const patterned=stockFinishHasPattern(style);
+  const angle=Number(orientation);
+  const valid=style==='none'||Boolean(materialCode.trim()&&(!patterned||patternCode.trim())&&orientation.trim()&&Math.abs(angle)<=360);
+  const edit=()=>setAcknowledged(false);
+  return <form className="stock-match-form" onSubmit={event=>{
+    event.preventDefault();
+    if(!keys.profileKey||!valid||conflict||!acknowledged)return;
+    onApply(style==='none'?undefined:{...keys,materialCode:materialCode.trim(),patternCode:patternCode.trim()||undefined,orientationDeg:angle,method,transparent});
+  }}>
+    <div className="new-content">
+      {!keys.profileKey?<p>填写印厂、卡基料号及厂家规格后，确认该卡面的反光用料。</p>:<>
+        {style!=='none'&&<>
+        <div className="stock-spec-fields">
+          <label className="field">反光材料料号<input value={materialCode} maxLength={120}
+            onChange={event=>{setMaterialCode(event.target.value);edit()}}/></label>
+          <label className="field">纹样号<input value={patternCode} maxLength={120} required={patterned}
+            onChange={event=>{setPatternCode(event.target.value);edit()}}/></label>
+        </div>
+        <div className="stock-spec-fields">
+          <label className="field">加工方式<span className="stock-select"><select value={method}
+            onChange={event=>{setMethod(event.target.value as StockFinishMatch['method']);edit()}}>
+            {Object.entries(STOCK_FINISH_METHODS).map(([id,name])=><option value={id} key={id}>{name}</option>)}
+          </select></span></label>
+          <label className="field">纹向（°）<input type="number" min={-360} max={360} step="any"
+            value={orientation} onChange={event=>{setOrientation(event.target.value);edit()}}/></label>
+        </div>
+        <label className="check-field"><input type="checkbox" checked={transparent}
+          onChange={event=>{setTransparent(event.target.checked);edit()}}/>反光材料透光</label>
+        {conflict&&<p className="stock-finish-message" role="alert">{conflict}</p>}
+        </>}
+        <label className="check-field"><input type="checkbox" checked={acknowledged}
+          onChange={event=>setAcknowledged(event.target.checked)}/>{style==='none'?'印厂已确认此面无反光':'印厂已确认此组合'}</label>
+      </>}
+    </div>
+    <div className="modal-footer">
+      <button type="button" className="button" onClick={onClose}>取消</button>
+      {keys.profileKey?<button type="submit" className="button primary" disabled={!valid||!!conflict||!acknowledged}>保存匹配</button>:
+        <button type="button" className="button primary" onClick={onPlan}>设置印厂规格</button>}
+    </div>
+  </form>;
 }
 
 export function LayerTypeField({ kind, disabled, onChange }: {

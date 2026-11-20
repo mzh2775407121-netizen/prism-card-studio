@@ -20,7 +20,8 @@
   color: #f1f1f1;
   background: #242424;
   border: 1px solid #474747;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
+  corner-shape: var(--prism-corner);
   margin: 0;
   padding: 8px 9px;
   font-size: 11px;
@@ -44,7 +45,8 @@
   gap: 12px;
   min-height: 36px;
   border: none;
-  border-radius: 12px;
+  border-radius: var(--radius-panel);
+  corner-shape: var(--prism-corner);
   background: #2c2c2c;
 }
 .compact-guides li { flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
@@ -60,33 +62,6 @@
   .print-guide-legend li { gap: 4px; }
   .guide-sample { flex-basis: 10px; }
 }
-.size-presets {
-  min-inline-size: 0;
-  border: 0;
-  margin: 0 0 10px;
-  padding: 0;
-}
-.size-presets legend { padding: 0; margin-bottom: 7px; font-size: 12px; font-weight: 650; }
-.size-preset-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-.size-preset {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 5px;
-  min-height: 54px;
-  padding: 7px 9px;
-  text-align: left;
-  border: 1px solid var(--control);
-  border-radius: 5px;
-  background: var(--surface);
-  color: var(--ink);
-}
-.size-preset:hover { background: var(--surface-raised); }
-.size-preset[aria-pressed="true"] { background: var(--active); border-color: var(--accent); }
-.size-preset strong { display: block; font-size: 12px; font-weight: 650; }
-.size-preset small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.size-preset svg { flex: 0 0 auto; color: var(--accent); }
-
 .corner-settings {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 148px;
@@ -98,7 +73,8 @@
   display: grid;
   place-items: center;
   min-height: 110px;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
+  corner-shape: var(--prism-corner);
   background: #303030;
 }
 .corner-preview-lines { position: relative; }

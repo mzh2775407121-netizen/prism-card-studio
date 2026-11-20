@@ -1,0 +1,16 @@
+{
+  "pyodideVersion": "0.29.2",
+  "packages": ["numpy", "pillow", "sqlite3", "charset-normalizer"],
+  "wheels": [
+    {
+      "name": "reportlab-5.1.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/4a/3c/bf68d44f160b44685fc714f746a954c71d0091b3dc4fd3c8670154b44841/reportlab-5.1.0-py3-none-any.whl",
+      "sha256": "59fdbaec5efe437095ad1d7292ec9a271c8ca2d3ec75e889c6e61400929b90df"
+    },
+    {
+      "name": "pypdf-7.1.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ed/4c/d19f91b743c8579b67e3d8b001e095745dec5bb13a9b4b9eadc235a85d9e/pypdf-7.1.0-py3-none-any.whl",
+      "sha256": "47cca6b24bdcf4c4d65b5f7b8b972535c61710a061261e737688777cfd9a7bfb"
+    }
+  ]
+}

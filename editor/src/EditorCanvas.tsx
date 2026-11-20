@@ -3,7 +3,10 @@ import { Stage, Layer, Group, Rect, Circle, Ellipse, Shape, Image as KonvaImage,
 import Konva from 'konva';
 import { PrintGuideLines, printGuideBounds } from './PrintGuides';
 import { processKind, type CardNode, type CardSide, type GradientPoint, type LayerGradient, type PathPoint, type Project, type Region, type SideName, type Stroke } from './model';
-import { artworkPath, loadImage, makeCanvas, drawArtwork, renderCard, renderEffectMask, renderEffects, renderRegionMask } from './render';
+import { applyAutoLayout, layoutParent } from './autoLayout';
+import { artworkPath, loadImage, makeCanvas, drawArtwork, renderCard, renderEffectMask, renderEffects, renderRegionMask, renderStockReflection, renderStockWhiteMask } from './render';
+import { isTransparentStock } from './stockMaterials';
+import { getStockAppearance, stockGroundColor } from './stockOptics';
 import { activeImageFill, fillType, gradientAngle, gradientPoints, hasFill, hasStroke } from './layerAppearance';
 import { isOpenVector, MAX_PATH_POINTS, traceVectorPath } from './vectorPaths';
 import { findLayerGroup, layerGroupMembers } from './layerGroups';
@@ -89,8 +92,9 @@ function artworkId(face: SideName, nodeId: string) {
   return `${face}-artwork-${nodeId}`;
 }
 
-function ArtworkNode({ node, face, interactive, canDrag = true, onSelect, onCommit, onDrag, onDrop, onTransformPreview, onTextEdit }: {
+function ArtworkNode({ node, face, interactive, outsideTrim, canDrag = true, onSelect, onCommit, onDrag, onDrop, onTransformPreview, onTextEdit }: {
   node: CardNode; face: SideName; interactive: boolean; onSelect: (additive: boolean) => void;
+  outsideTrim?: { width: number; height: number };
   canDrag?: boolean;
   onCommit: (node: CardNode) => void; onDrag: (node: CardNode) => void;
   onDrop: (node: CardNode, cancelled: boolean) => void;
@@ -154,7 +158,20 @@ function ArtworkNode({ node, face, interactive, canDrag = true, onSelect, onComm
   };
   if (node.type === 'empty') return null;
   return <Shape {...common} perfectDrawEnabled={false} lineJoin="round"
-    sceneFunc={context => drawArtwork(context._context, node, image)}
+    sceneFunc={(context, shape) => {
+      const raw = context._context;
+      if (!outsideTrim) { drawArtwork(raw, node, image); return; }
+      const padding = Math.max(1, node.strokeWidth || 0) * 4;
+      const visible = new Path2D();
+      visible.rect(-padding, -padding, node.width + padding * 2, node.height + padding * 2);
+      const trim = new Path2D();
+      trim.rect(0, 0, outsideTrim.width, outsideTrim.height);
+      visible.addPath(trim, new DOMMatrix(shape.getTransform().copy().invert().getMatrix()));
+      raw.save();
+      raw.clip(visible, 'evenodd');
+      drawArtwork(raw, node, image);
+      raw.restore();
+    }}
     hitFunc={(context, shape) => {
       const raw = context._context;
       const path = artworkPath(node);
@@ -210,6 +227,8 @@ function GradientHandles({ node, scale, onStart, onChange }: {
 function useFaceArtwork(project: Project, face: SideName, side: CardSide, flashOnly = false) {
   const [clipped, setClipped] = useState<HTMLCanvasElement>();
   const [effects, setEffects] = useState<HTMLCanvasElement>();
+  const [stock, setStock] = useState<Awaited<ReturnType<typeof renderStockReflection>>>();
+  const [whiteStock, setWhiteStock] = useState<HTMLCanvasElement>();
   const hasClips = side.nodes.some(node => node.type !== 'empty' && node.clipRegionId && node.visible);
   useEffect(() => {
     if (!hasClips) { setClipped(undefined); return; }
@@ -222,29 +241,56 @@ function useFaceArtwork(project: Project, face: SideName, side: CardSide, flashO
   useEffect(() => {
     let current = true;
     const effectSide = flashOnly ? { ...side, effects: side.effects.filter(effect => processKind(effect) === 'reflection') } : side;
-    renderEffects(project, effectSide, 1, 0, !flashOnly)
+    renderEffects(project, effectSide)
       .then(canvas => { if (current) setEffects(canvas); })
       .catch(() => { if (current) setEffects(undefined); });
     return () => { current = false; };
-  }, [project.widthMm, project.heightMm, project.material, project.stockReflection, project.previewStyle, side, flashOnly]);
-  return { clipped: hasClips ? clipped : undefined, effects };
+  }, [project.widthMm, project.heightMm, project.previewStyle, side, flashOnly]);
+  useEffect(() => {
+    if (flashOnly) return;
+    let current = true;
+    renderStockReflection(project, side, 1, true)
+      .then(canvas => { if (current) setStock(canvas); })
+      .catch(() => { if (current) setStock(undefined); });
+    return () => { current = false; };
+  }, [project.widthMm, project.heightMm, project.bleedMm, project.cornerRadiusMm, project.production?.dieShape,
+    project.material, project.stockReflection, project.stockSpec, project.production?.printer, project.production?.stockCode,
+    project.production?.printProfile, side, flashOnly]);
+  useEffect(() => {
+    if (!isTransparentStock(project.material) || flashOnly) return;
+    let current = true;
+    renderStockWhiteMask(project, side, 1, true)
+      .then(canvas => { if (current) setWhiteStock(canvas); })
+      .catch(() => { if (current) setWhiteStock(undefined); });
+    return () => { current = false; };
+  }, [project.widthMm, project.heightMm, project.bleedMm, project.material, side, flashOnly]);
+  return { clipped: hasClips ? clipped : undefined, effects, stock: flashOnly ? undefined : stock,
+    whiteStock: !flashOnly && isTransparentStock(project.material) ? whiteStock : undefined };
 }
 
-function previewDrag(project: Project, face: SideName, dragged?: CardNode, selectedIds: readonly string[] = [], groupId?: string) {
+function previewDrag(project: Project, face: SideName, dragged?: CardNode, selectedIds: readonly string[] = [], groupId?: string,
+  destination?: SideName,
+) {
   const side = project[face];
   if (!dragged) return side;
   const original = side.nodes.find(node => node.id === dragged.id);
   const translating = original && original.width === dragged.width &&
     original.height === dragged.height && original.rotation === dragged.rotation;
   if (translating && groupId && layerGroupMembers(side, groupId).artworkIds.includes(dragged.id)) {
-    return moveArtworkGroup(project, face, groupId, { x: dragged.x - original.x, y: dragged.y - original.y }) ?? side;
+    return moveArtworkGroup(project, face, groupId, { x: dragged.x - original.x, y: dragged.y - original.y },
+      { previewAcrossFaces: Boolean(destination) }) ?? side;
   }
-  const translateGroup = translating && original.groupId && !findLayerGroup(side, original.groupId);
   return { ...side, nodes: side.nodes.map(node => {
     if (node.id === dragged.id) return dragged;
-    return ((translateGroup && node.groupId === original?.groupId) || (original && selectedIds.includes(original.id) && selectedIds.includes(node.id) && node.visible)) && !node.locked
+    return original && selectedIds.includes(original.id) && selectedIds.includes(node.id) && node.visible && !node.locked
       ? { ...node, x: node.x + dragged.x - original.x, y: node.y + dragged.y - original.y } : node;
   }) };
+}
+
+function previewText(side: CardSide, draft?: CardNode): CardSide {
+  if (!draft) return side;
+  const view = { ...side, nodes: side.nodes.map(node => node.id === draft.id ? draft : node) };
+  return layoutParent(side, draft.id) ? applyAutoLayout(view) : view;
 }
 
 export default function EditorCanvas({ project, side: sideName, selectedId, selectedIds, artworkGroupId, onSelect, onCanvasMenu, onSelectFace, onTransferArtwork, sidebarDropFace, faceLocked, onChange,
@@ -278,17 +324,17 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
   const selection = useMemo(() => selectedIds?.length ? selectedIds : selectedId ? [selectedId] : [], [selectedIds, selectedId]);
   const currentSide = project[sideName];
   const textTarget = textEdit && project[textEdit.face].nodes.find(node => node.id === textEdit.id && node.type === 'text' && node.visible && !node.locked);
-  const textNode = useMemo(() => {
+  const draftNode = useMemo(() => {
     if (!textTarget || !textEdit) return undefined;
     const text = textDraft?.face === textEdit.face && textDraft.id === textEdit.id ? textDraft.text : textTarget.text || '';
-    const draft = expandedTextDraft(textTarget, text);
+    const draft = layoutParent(project[textEdit.face], textTarget.id) ? { ...textTarget, text } : expandedTextDraft(textTarget, text);
     const visibleFill = hasFill(draft) && (draft.fillOpacity ?? 1) > 0;
     const visibleStroke = hasStroke(draft) && (draft.strokeOpacity ?? 1) > 0;
     return draft.opacity > 0 && (visibleFill || visibleStroke) ? draft : {
       ...draft, opacity: 1, fill: EDITOR_FOCUS, fillMode: 'solid' as const,
       fillHidden: false, fillOpacity: 1, strokeHidden: true, clipRegionId: undefined,
     };
-  }, [textTarget, textEdit?.face, textEdit?.id, textDraft, fontsReady]);
+  }, [project, textTarget, textEdit?.face, textEdit?.id, textDraft, fontsReady]);
   useEffect(() => { setTextDraft(undefined); }, [textEdit?.face, textEdit?.id]);
   useEffect(() => {
     let alive = true;
@@ -301,15 +347,20 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
   const groupLocked = Boolean(groupMembers && currentSide.nodes.some(node => groupMembers.artworkIds.includes(node.id) && node.locked));
   const frontDrag = dragged?.face === 'front' ? dragged.node : undefined;
   const backDrag = dragged?.face === 'back' ? dragged.node : undefined;
+  const frontDestination = frontDrag ? dragged?.destination : undefined;
+  const backDestination = backDrag ? dragged?.destination : undefined;
   const front = useMemo(() => {
-    const view = previewDrag(project, 'front', frontDrag, sideName === 'front' ? selection : [], sideName === 'front' ? activeGroup?.id : undefined);
-    return textNode && textEdit?.face === 'front' ? { ...view, nodes: view.nodes.map(node => node.id === textNode.id ? textNode : node) } : view;
-  }, [project, frontDrag, sideName, selection, activeGroup?.id, textNode, textEdit?.face]);
+    const editing = sideName === 'front';
+    const view = previewDrag(project, 'front', frontDrag, editing ? selection : [], editing ? activeGroup?.id : undefined, frontDestination);
+    return previewText(view, textEdit?.face === 'front' ? draftNode : undefined);
+  }, [project, frontDrag, frontDestination, sideName, selection, activeGroup?.id, draftNode, textEdit?.face]);
   const back = useMemo(() => {
-    const view = previewDrag(project, 'back', backDrag, sideName === 'back' ? selection : [], sideName === 'back' ? activeGroup?.id : undefined);
-    return textNode && textEdit?.face === 'back' ? { ...view, nodes: view.nodes.map(node => node.id === textNode.id ? textNode : node) } : view;
-  }, [project, backDrag, sideName, selection, activeGroup?.id, textNode, textEdit?.face]);
+    const editing = sideName === 'back';
+    const view = previewDrag(project, 'back', backDrag, editing ? selection : [], editing ? activeGroup?.id : undefined, backDestination);
+    return previewText(view, textEdit?.face === 'back' ? draftNode : undefined);
+  }, [project, backDrag, backDestination, sideName, selection, activeGroup?.id, draftNode, textEdit?.face]);
   const views = { front, back };
+  const textNode = draftNode && textEdit && views[textEdit.face].nodes.find(node => node.id === draftNode.id);
   const side = views[sideName];
   const artwork = {
     front: useFaceArtwork(project, 'front', front, sideName === 'front' && flashOnly),
@@ -321,10 +372,17 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
     : undefined;
   const width = project.widthMm * 10;
   const height = project.heightMm * 10;
-  const { bleed: bleedBounds, trim: { cornerRadius } } = printGuideBounds(project);
+  const { bleed: bleedBounds, trim: trimBounds } = printGuideBounds(project);
+  const { cornerRadius } = trimBounds;
+  const clipToBleed = (context: Konva.Context) => {
+    context.beginPath();
+    context.roundRect(bleedBounds.x, bleedBounds.y, bleedBounds.width, bleedBounds.height, bleedBounds.cornerRadius);
+    context.closePath();
+  };
   const faceWidth = width + Math.max(width * .165, project.bleedMm * 20 + 24);
-  const spreadWidth = faceWidth + width;
-  const spreadWithBleed = faceWidth + bleedBounds.width;
+  const faces: readonly SideName[] = project.singleSided ? ['front'] : FACES;
+  const spreadWidth = (project.singleSided ? 0 : faceWidth) + width;
+  const spreadWithBleed = (project.singleSided ? 0 : faceWidth) + bleedBounds.width;
   const boardFit = Math.min((size.width * .737) / spreadWithBleed, (size.height - 120) / bleedBounds.height);
   const fit = showGuides ? Math.min(boardFit,
     (size.width - Math.min(52, size.width * .12)) / spreadWithBleed,
@@ -343,7 +401,7 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
   const faceAt = (point?: Point | null) => {
     if (!point || point.x < 0 || point.x > size.width || point.y < 0 || point.y > size.height ||
       point.y < origin.y + bleedBounds.y * scale || point.y > origin.y + (bleedBounds.y + bleedBounds.height) * scale) return undefined;
-    return FACES.find(face => point.x >= faceLeft(face) + bleedBounds.x * scale &&
+    return faces.find(face => point.x >= faceLeft(face) + bleedBounds.x * scale &&
       point.x <= faceLeft(face) + (bleedBounds.x + bleedBounds.width) * scale);
   };
   const draggedGroupId = (face: SideName, nodeId: string) => face === sideName && groupMembers?.artworkIds.includes(nodeId) ? activeGroup?.id : undefined;
@@ -613,7 +671,6 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
     const previous = currentSide.nodes.find(item => item.id === node.id);
     const translating = previous && node.width === previous.width &&
       node.height === previous.height && node.rotation === previous.rotation;
-    const translateGroup = translating && previous.groupId && !findLayerGroup(currentSide, previous.groupId);
     const dx = node.x - (previous?.x ?? node.x);
     const dy = node.y - (previous?.y ?? node.y);
     const groupId = draggedGroupId(face, node.id);
@@ -626,12 +683,20 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
     onChange({ ...currentSide, nodes: currentSide.nodes.map(item => {
       if (item.id === node.id) return node;
       const selectedTogether = face === sideName && selection.includes(node.id) && selection.includes(item.id);
-      return ((translateGroup && item.groupId === previous?.groupId) || (selectedTogether && item.visible)) && !item.locked
+      return selectedTogether && item.visible && !item.locked
         ? { ...item, x: item.x + dx, y: item.y + dy } : item;
     }) }, face);
   };
   const dragNode = (face: SideName, node: CardNode) => {
     const destination = dragDestination(face, node.id);
+    const groupId = draggedGroupId(face, node.id);
+    if (!destination && groupId && layoutParent(project[face], groupId)) {
+      const original = project[face].nodes.find(item => item.id === node.id);
+      if (original) stageRef.current?.findOne('#' + artworkId(face, node.id))?.position(original);
+      if (dragged) setDragged(null);
+      if (snap.x || snap.y) setSnap({ x: false, y: false });
+      return;
+    }
     const centerX = faceOffset(destination ?? face) - faceOffset(face) + width / 2;
     const closeX = Math.abs(node.x + node.width / 2 - centerX) < 6 / scale;
     const closeY = Math.abs(node.y + node.height / 2 - height / 2) < 6 / scale;
@@ -663,7 +728,7 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
     Math.hypot(vectorHover.x - vectorDraft.points[0].x, vectorHover.y - vectorDraft.points[0].y) * scale <= 9);
   const vectorTool = !regionMode && ['line', 'pen'].includes(tool);
   // Keep the source above the destination while Konva is still dragging the original node.
-  const drawOrder = dragged?.destination === 'back' ? ['back', 'front'] as const : FACES;
+  const drawOrder = !project.singleSided && dragged?.destination === 'back' ? ['back', 'front'] as const : faces;
 
   return <div ref={holder} className="editor-canvas" data-testid="editor-canvas"
     data-canvas-tool={tool} data-vector-points={vectorDraft?.points.length || 0}
@@ -727,14 +792,26 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
           const showMask = editing && (regionMode || highlightRegion);
           const original = project[face];
           const composite = artwork[face];
+          const ground = facePlate ? '#ffffff' : stockGroundColor(project.material, getStockAppearance(project, original));
           return <Group key={face} name={`card-face-${face}`} x={faceLeft(face)} y={origin.y} scaleX={scale} scaleY={scale}>
-            <Rect name="card-ground" {...bleedBounds} fill="#ffffff"
+            <Rect name="card-ground" {...bleedBounds} fill={ground}
               shadowColor="#000000" shadowOpacity={0.28} shadowBlur={34 / scale} shadowOffsetY={14 / scale} />
+            {composite.whiteStock && !facePlate && <Group clipFunc={clipToBleed} listening={false}>
+              <KonvaImage image={composite.whiteStock} x={bleedBounds.x} y={bleedBounds.y}
+                width={bleedBounds.width} height={bleedBounds.height} />
+            </Group>}
+            {composite.stock && !painting && !facePlate && <KonvaImage name="stock-reflection" image={composite.stock.canvas}
+              x={bleedBounds.x} y={bleedBounds.y} width={bleedBounds.width} height={bleedBounds.height}
+              opacity={composite.stock.opacity} globalCompositeOperation={composite.stock.blend} listening={false} />}
             {/* Artwork stays interactive beyond the trim area, in the coordinates of its own face. */}
             {!facePlate && original.nodes.map((node, index) => <ArtworkNode key={node.id} face={face}
               node={dragged?.face === face && dragged.node.id === node.id ? node : views[face].nodes[index]}
+              outsideTrim={composite.clipped ? trimBounds : undefined}
               interactive={tool === 'select' && !regionMode && !handMode && !panning && !(editing && flashOnly) && (editing || !faceDisabled)}
-              canDrag={!(textEdit?.face === face && textNode?.id === node.id) && !(editing && groupLocked && groupMembers?.artworkIds.includes(node.id))}
+              canDrag={!(textEdit?.face === face && textNode?.id === node.id) &&
+                (editing && activeGroup && groupMembers?.artworkIds.includes(node.id)
+                  ? !groupLocked && (!project.singleSided || !layoutParent(original, activeGroup.id))
+                  : !layoutParent(original, node.id))}
               onSelect={additive => {
                 if (editing) { if (additive || !(activeGroup && groupMembers?.artworkIds.includes(node.id)) && !(selection.length > 1 && selection.includes(node.id))) onSelect(node.id, additive); }
                 else onSelectFace(face, node.id);
@@ -743,15 +820,8 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
               onDrop={(value, cancelled) => dropNode(face, value, cancelled)}
               onTransformPreview={value => setDragged({ face, node: value })}
               onTextEdit={() => { if (node.type === 'text' && node.visible && !node.locked) onTextEdit?.(face, node.id); }} />)}
-            <Group clipFunc={context => {
-              context.beginPath();
-              context.roundRect(bleedBounds.x, bleedBounds.y, bleedBounds.width, bleedBounds.height, bleedBounds.cornerRadius);
-              context.closePath();
-            }}>
-              {!facePlate && composite.clipped && <>
-                <Rect width={width} height={height} fill="#ffffff" listening={false} />
-                <KonvaImage image={composite.clipped} width={width} height={height} listening={false} />
-              </>}
+            <Group clipFunc={clipToBleed}>
+              {!facePlate && composite.clipped && <KonvaImage image={composite.clipped} width={width} height={height} listening={false} />}
               {composite.effects && !painting && !facePlate && <KonvaImage image={composite.effects} width={width} height={height} listening={false} />}
               {facePlate && plateImage && <KonvaImage image={plateImage} width={width} height={height} listening={false} />}
               {painting && <Rect width={width} height={height} fill="#000000" opacity={.3} listening={false} />}
@@ -834,7 +904,7 @@ export default function EditorCanvas({ project, side: sideName, selectedId, sele
       <span>{tool === 'pen' ? '单击添加节点 · 拖动设置曲线 · Enter 完成 · Esc 取消' :
         '拖动绘制 · Shift 锁定角度 · Esc 取消'}</span>
     </div>}
-    {FACES.map(face => {
+    {faces.map(face => {
       const editing = face === sideName;
       const left = faceLeft(face);
       const boardLeft = left + bleedBounds.x * scale;

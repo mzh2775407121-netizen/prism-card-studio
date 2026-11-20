@@ -70,11 +70,16 @@ export function ScrubField({ label, mark, unit, value, min = -10000, max = 10000
   </label>;
 }
 
-export function LayerGeometry({ node, onChange, onEditStart, children }: EditingProps & { node: CardNode; children: ReactNode }) {
+export function LayerGeometry({ node, onChange, onEditStart, children, managedPosition }: EditingProps & {
+  node: CardNode;
+  children: ReactNode;
+  managedPosition?: boolean;
+}) {
   const fields = [['x','X','水平位置'],['y','Y','垂直位置'],['width','宽','宽度'],['height','高','高度']] as const;
   const geometryFields = fields.map(([key, mark, label]) => <ScrubField key={key} label={label + '（毫米）'}
     mark={mark} value={node[key] / 10}
-    min={key === 'width' || key === 'height' ? .1 : -10000} disabled={node.locked} onEditStart={onEditStart}
+    min={key === 'width' || key === 'height' ? .1 : -10000}
+    disabled={node.locked || Boolean(managedPosition && (key === 'x' || key === 'y'))} onEditStart={onEditStart}
     onChange={value => onChange({ [key]: value * 10 })}/>);
   const rotate = (degrees: number) => {
     const angle = (degrees + 360) % 360;
@@ -82,7 +87,7 @@ export function LayerGeometry({ node, onChange, onEditStart, children }: Editing
   };
   return <>
     <StyleSection title="位置" className="style-geometry-position">
-      <div className="style-property"><span className="style-caption">对齐</span>{children}</div>
+      {!managedPosition && <div className="style-property"><span className="style-caption">对齐</span>{children}</div>}
       <div className="style-property"><span className="style-caption">位置</span>
         <div className="style-fields style-coordinates">{geometryFields.slice(0, 2)}</div>
       </div>

@@ -1,7 +1,8 @@
-.layer-context-menu { position:fixed; z-index:1000; box-sizing:border-box; width:199px; max-height:calc(100dvh - 8px); overflow:auto; padding:4px; background:#1e1e1e; border:1px solid #3e3e3e; border-radius:8px; box-shadow:0 4px 12px #0005; outline:none; }
+.layer-context-menu { position:fixed; z-index:1000; box-sizing:border-box; width:199px; max-height:calc(100dvh - 8px); overflow:auto; padding:4px; background:#1e1e1e; border:1px solid #3e3e3e; border-radius:var(--radius-item); corner-shape:var(--prism-corner); box-shadow:0 4px 12px #0005; outline:none; }
 .layer-context-menu[tabindex]:focus-visible { outline: none; }
 .layer-context-menu .menu-divider { border-top:1px solid #3d3d3d; margin-top:8px; padding-top:8px; }
-.layer-context-menu button { display:flex; align-items:center; justify-content:space-between; width:100%; height:27px; padding:0 7px; border:0; border-radius:4px; color:#f2f2f2; background:transparent; font:500 12px/17px "PingFang SC",sans-serif; }
+.layer-context-menu button { display:flex; align-items:center; justify-content:space-between; width:100%; height:27px; padding:0 7px; border:0; border-radius:var(--radius-compact); corner-shape:var(--prism-corner); color:#f2f2f2; background:transparent; font:500 12px/17px "PingFang SC",sans-serif; }
 .layer-context-menu button span { color:#a6a6a6; }
+.layer-context-menu button .menu-item-label { display:flex; align-items:center; gap:8px; color:inherit; }
 .layer-context-menu button:enabled:is(:hover,:focus-visible) { background:#3d3d3d; outline:none; }
 .layer-context-menu button:disabled { opacity:.42; }

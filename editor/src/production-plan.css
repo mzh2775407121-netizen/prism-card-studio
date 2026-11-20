@@ -35,11 +35,11 @@ dialog.modal.drawer:has(.production-body) { overflow: hidden; }
 .production-spec small { color: var(--muted); font-size: 11px; margin-top: 4px; }
 .production-spec .button { flex-shrink: 0; }
 .die-layout { display: grid; grid-template-columns: minmax(100px, 36%) 1fr; align-items: center; gap: 16px; }
-.die-preview { width: 100%; height: 140px; background: #363636; border-radius: 6px; }
+.die-preview { width: 100%; height: 140px; background: #363636; border-radius: var(--radius-control); corner-shape: var(--prism-corner); }
 .die-preview-cut, .die-preview-bleed { fill: none; stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; opacity: .6; }
 .die-preview-cut { stroke: #f2f2f2; }
 .die-preview-bleed { stroke: #ffab89; }
-.work-order-list { list-style: none; margin: 12px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 6px; max-height: 340px; overflow: auto; }
+.work-order-list { list-style: none; margin: 12px 0 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-control); corner-shape: var(--prism-corner); max-height: 340px; overflow: auto; }
 .work-order-list li { display: flex; align-items: center; min-height: 48px; border-bottom: 1px solid var(--line); }
 .work-order-list li:last-child { border-bottom: 0; }
 .work-order-list li:hover { background: #f6f6f6; }
@@ -55,6 +55,15 @@ dialog.modal.drawer:has(.production-body) { overflow: hidden; }
 .work-order-fields { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
 .work-order-detail-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; font-size: 12px; }
 .production-section textarea { resize: vertical; min-width: 0; }
+.print-profile-switch { display: grid; gap: 8px; margin-block: 10px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-control); corner-shape: var(--prism-corner); }
+.print-profile-switch p { margin: 0; font-size: 12px; }
+.print-profile-switch-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.print-profile-compare { display: grid; gap: 6px; }
+.print-profile-sources { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.print-profile-sources a { color: inherit; text-underline-offset: 2px; }
+.print-profile-details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.print-profile-details summary { cursor: pointer; font-size: 12px; font-weight: 610; }
+.print-profile-details[open] summary { margin-bottom: 8px; }
 .production-footer { flex-shrink: 0; }
 .production-footer .primary { margin-left: auto; }
 .production-footer .button svg { flex: none; }

@@ -15,6 +15,7 @@ import io
 import json
 import math
 import mimetypes
+import re
 import threading
 import sqlite3
 import warnings
@@ -44,7 +45,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 EXPORT_SLOTS = threading.BoundedSemaphore(2)
-PRINT_ENGINE = 'prism-print/1.2'
+PRINT_ENGINE = 'prism-print/1.3'
 DIST_DIRECTORY = Path(__file__).resolve().parent / 'dist'
 SPOT_PROFILES = {
     'standard': {'white': 'White', 'foil': 'Foil_Gold', 'clear': 'Spot_UV',
@@ -66,6 +67,13 @@ PLATE_LABELS = {'white': '白墨', 'foil': '箔', 'clear': '光油', 'primer': '
 MANUAL_OPERATIONS = {'lamination': '覆膜', 'coating': '全幅涂布', 'edge': '边缘处理',
                      'inspection': '质检与包装', 'custom': '其他工序'}
 FACE_LABELS = {'front': '正面', 'back': '背面', 'both': '整卡'}
+FINISH_LABELS = {
+    'none': '无反光', 'mirror': '亮银', 'matte-silver': '亚银', 'rainbow': '素面彩虹',
+    'dots': '点闪', 'cracked-ice': '碎冰', 'pillar': '光柱', 'radial': '放射镭射',
+}
+FINISH_METHODS = {'composite': '预制复合卡基', 'underprint': '印前复合或转移', 'overlaminate': '印后覆膜'}
+METAL_FINISHES = ('mirror', 'matte-silver')
+STOCK_CORES = {'white': '白芯', 'none': '无芯', 'blue': '蓝芯', 'black': '黑芯', 'gray': '灰芯'}
 
 
 class ExportError(ValueError):
@@ -106,6 +114,53 @@ def decode_image(value, label):
         raise ExportError(f'{label}无法读取，请重新导出图片') from error
 
 
+def read_stock_spec(raw):
+    if not isinstance(raw, dict) or ('grammageGsm' in raw and 'thicknessMm' in raw):
+        raise ExportError('卡基规格无效')
+    stock = {}
+    for key, label, lower, upper in (('grammageGsm', '卡基克重', 1, 2000), ('thicknessMm', '卡基片厚', .01, 10)):
+        if key in raw:
+            stock[key] = numeric(raw[key], label, lower, upper)
+    if 'core' in raw:
+        core = raw['core']
+        if not isinstance(core, str) or core not in STOCK_CORES:
+            raise ExportError('卡基芯层无效')
+        stock['core'] = core
+    return stock
+
+
+def read_face_finishes(raw, sides):
+    if not isinstance(raw, list) or len(raw) != len(sides):
+        raise ExportError('反光用料需与交稿卡面对应')
+    finishes = {}
+    for row in raw:
+        if not isinstance(row, dict):
+            raise ExportError('卡面反光格式无效')
+        side, style, status = row.get('side'), row.get('style'), row.get('status')
+        if not isinstance(side, str) or side not in sides or side in finishes:
+            raise ExportError('反光用料需与交稿卡面对应')
+        if (not isinstance(style, str) or style not in FINISH_LABELS or
+                status not in ('pending', 'confirmed', 'not-used') or
+                (status == 'not-used' and style != 'none') or (status == 'confirmed' and style == 'none')):
+            raise ExportError('反光样式或确认状态无效')
+        finish = {'side': side, 'style': style, 'label': FINISH_LABELS[style], 'status': status}
+        if status == 'confirmed':
+            method, transparent = row.get('method'), row.get('transparent')
+            material_code = read_work_text(row, 'materialCode', 120)
+            pattern_code = read_work_text(row, 'patternCode', 120)
+            patterned = style not in METAL_FINISHES
+            if (not material_code or (patterned and not pattern_code) or
+                    not isinstance(method, str) or method not in FINISH_METHODS or
+                    not isinstance(transparent, bool) or (transparent and style in METAL_FINISHES)):
+                raise ExportError(f'{FACE_LABELS[side]}反光用料不完整或不兼容')
+            finish.update(materialCode=material_code, method=method, transparent=transparent,
+                          orientationDeg=numeric(row.get('orientationDeg'), '底材反光纹向', -360, 360))
+            if pattern_code:
+                finish['patternCode'] = pattern_code
+        finishes[side] = finish
+    return [finishes[side] for side in ('front', 'back') if side in sides]
+
+
 def validate_request(payload):
     if not isinstance(payload, dict) or not isinstance(payload.get('project'), dict):
         raise ExportError('缺少项目数据')
@@ -126,6 +181,13 @@ def validate_request(payload):
         'material': str(source.get('material', '未指定'))[:200],
         'stockReflection': str(source.get('stockReflection', '未指定'))[:40],
     }
+    if 'cardId' in source:
+        card_id = read_work_text(source, 'cardId', 302)
+        if not card_id:
+            raise ExportError('卡牌标识无效')
+        project['cardId'] = card_id
+    if 'stockSpec' in source:
+        project['stockSpec'] = read_stock_spec(source['stockSpec'])
     raw_pages = payload.get('pages')
     if not isinstance(raw_pages, list) or not 1 <= len(raw_pages) <= 2:
         raise ExportError('请选择一面或正反两面')
@@ -193,6 +255,8 @@ def validate_request(payload):
         pages.append({'side': side, 'artwork': artwork, 'masks': masks,
                       'thresholded': thresholded, 'layers': layers})
     pages.sort(key=lambda page: 0 if page['side'] == 'front' else 1)
+    if 'faceFinishes' in source:
+        project['faceFinishes'] = read_face_finishes(source['faceFinishes'], sides)
     return project, profile, pages
 
 
@@ -324,12 +388,87 @@ def create_die(project, shape, radius):
     return {'die.pdf': data, 'die.svg': svg.encode('utf-8')}
 
 
+def read_work_text(source, key, limit):
+    value = source.get(key, '')
+    if not isinstance(value, str) or len(value) > limit:
+        raise ExportError(f'工艺单字段 {key} 格式无效')
+    return value.strip()
+
+
+def configured_print(payload, project, pages, profile):
+    raw = payload.get('production')
+    spec = raw.get('printProfile') if isinstance(raw, dict) else None
+    names = dict(SPOT_PROFILES[profile])
+    if spec is None:
+        return None, names
+    if not isinstance(spec, dict) or spec.get('route') != 'specialty':
+        raise ExportError('工艺配置不是技术分版路线')
+    if spec.get('colorRequirement') != 'standard' or spec.get('requireVectorPlates') is not False:
+        raise ExportError('技术打样引擎不支持此配置的 ICC 或矢量工艺要求')
+    config = {
+        key: read_work_text(spec, key, limit)
+        for key, limit in (('product', 120), ('version', 60), ('reference', 600))
+    }
+    if not all(config.values()) or not read_work_text(raw, 'printer', 120) or not read_work_text(raw, 'stockCode', 120):
+        raise ExportError('请填写印厂、产品、材料料号、厂规版本和依据')
+    for finish in project.get('faceFinishes', ()):
+        if finish['status'] == 'pending':
+            raise ExportError(f"{FACE_LABELS[finish['side']]}底材反光待印厂确认")
+    for key, label, lo, hi in (('widthMm', '成品宽度', 20, 300), ('heightMm', '成品高度', 20, 300), ('bleedMm', '出血', 0, 20)):
+        value = numeric(spec.get(key), label, lo, hi)
+        if abs(value - project[key]) > .005:
+            raise ExportError(f'{label}与厂规不符')
+        config[key] = value
+    dpi = numeric(spec.get('dpi'), '输出分辨率', 150, 1200)
+    dimensions = ((config[key] + 2 * config['bleedMm']) * dpi / 25.4 for key in ('widthMm', 'heightMm'))
+    if any(abs(pixels - expected) > .51 for pixels, expected in zip(pages[0]['artwork'].size, dimensions)):
+        raise ExportError('输出像素尺寸与所选厂规分辨率不符')
+    faces = spec.get('faces')
+    sides = [page['side'] for page in pages]
+    if faces not in ('both', 'front', 'either') or (faces == 'both' and sides != ['front', 'back']) or (faces == 'front' and sides != ['front']):
+        raise ExportError('输出卡面与厂规不符')
+    orientation = spec.get('backOrientation', 'normal')
+    if orientation not in ('normal', 'rotate180', 'mirror'):
+        raise ExportError('背面方向无效')
+    custom = spec.get('spotNames')
+    if not isinstance(custom, dict) or set(custom) - {'white', 'foil'}:
+        raise ExportError('专色通道无效')
+    for key in custom:
+        name = read_work_text(custom, key, 64)
+        if name and not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', name):
+            raise ExportError('专色名称无效')
+        if name:
+            names[key] = name
+    if len(set(names.values())) != len(names) or 'CutContour' in names.values():
+        raise ExportError('专色名称不能与其它通道或刀线重名')
+    config.update(route='specialty', colorRequirement='standard', dpi=dpi, faces=faces,
+                  backOrientation=orientation, spotNames={key: names[key] for key in custom},
+                  safeMm=numeric(spec.get('safeMm'), '正文安全区内缩', 0, 20),
+                  minImagePpi=numeric(spec.get('minImagePpi'), '原图最低有效 PPI', 0, 1200),
+                  minPlateWidthMm=numeric(spec.get('minPlateWidthMm'), '工艺最小线宽', 0, 10),
+                  plateTrimMarginMm=numeric(spec.get('plateTrimMarginMm'), '工艺版离裁切边', 0, 20),
+                  whiteFoilGapMm=numeric(spec.get('whiteFoilGapMm'), '白墨与箔版间距', 0, 10))
+    for key in ('requireBleedArtwork', 'foilWhiteOverlap'):
+        if not isinstance(spec.get(key), bool):
+            raise ExportError(f'工艺配置字段 {key} 无效')
+        config[key] = spec[key]
+    return config, names
+
+
+def read_preflight(payload):
+    raw = payload.get('preflight', [])
+    if not isinstance(raw, list) or len(raw) > 20_000:
+        raise ExportError('印前检查报告无效')
+    findings = []
+    for finding in raw:
+        if not isinstance(finding, dict) or finding.get('blocking') is not False:
+            raise ExportError('请先处理印前检查的阻塞问题')
+        findings.append({'text': read_work_text(finding, 'text', 1000), 'blocking': False})
+    return findings
+
+
 def build_production_order(raw, project, reports):
-    def read_text(source, key, limit):
-        value = source.get(key, '')
-        if not isinstance(value, str) or len(value) > limit:
-            raise ExportError(f'工艺单字段 {key} 格式无效')
-        return value.strip()
+    read_text = read_work_text
 
     if raw is not None and not isinstance(raw, dict):
         raise ExportError('工艺单格式无效')
@@ -378,7 +517,11 @@ def build_production_order(raw, project, reports):
             entry = dict(kind=kind, face=face, name=read_text(row, 'name', 100) or MANUAL_OPERATIONS[kind], files=[])
         else:
             raise ExportError('工艺单引用了本次未导出的卡面或分版')
-        order.append(dict(entry, id=key, sequence=index, method=read_text(row, 'method', 120), note=read_text(row, 'note', 600)))
+        required = read_text(row, 'requiresStepId', 330)
+        if required and (required == key or required not in seen):
+            raise ExportError('工艺顺序缺少前置工序，或前置工序顺序不正确')
+        order.append(dict(entry, id=key, sequence=index, method=read_text(row, 'method', 120), note=read_text(row, 'note', 600),
+                          materialCode=read_text(row, 'materialCode', 120), requiresStepId=required))
     if expected:
         raise ExportError('工艺单缺少应随文件导出的工序')
     job = {
@@ -390,17 +533,53 @@ def build_production_order(raw, project, reports):
     return job, create_die(project, shape, radius)
 
 
+def stock_details_text(project):
+    stock = project.get('stockSpec', {})
+    details = [project['material']]
+    if 'grammageGsm' in stock:
+        details.append(f"{stock['grammageGsm']:g} g/m²")
+    if 'thicknessMm' in stock:
+        details.append(f"{stock['thicknessMm']:g} mm")
+    if 'core' in stock:
+        details.append(STOCK_CORES[stock['core']])
+    lines = ['卡基  ' + ' · '.join(details)]
+    if 'cardId' in project:
+        lines.insert(0, f"卡牌标识  {project['cardId']}")
+    if 'faceFinishes' not in project:
+        return [*lines, f"底材反光  {project['stockReflection']}"]
+    for finish in project['faceFinishes']:
+        parts = [finish['label']]
+        if finish['status'] == 'pending':
+            parts.append('待印厂确认')
+        if finish['status'] == 'confirmed':
+            parts.append(f"反光料号 {finish['materialCode']}")
+            if 'patternCode' in finish:
+                parts.append(f"纹样号 {finish['patternCode']}")
+            parts.extend([f"纹向 {finish['orientationDeg']:g}°", FINISH_METHODS[finish['method']],
+                          '反光材料透光' if finish['transparent'] else '反光材料不透光'])
+        lines.append(f"{FACE_LABELS[finish['side']]}底材反光  " + ' · '.join(parts))
+    return lines
+
+
 def production_order_text(job):
     lines = ['Prism 卡牌生产工艺单', f"项目  {job['project']['name']}", '状态  待印厂确认',
-             f"基材  {job['project']['material']}", f"底材反光  {job['project']['stockReflection']}"]
+             *stock_details_text(job['project'])]
     if job['stockCode']:
         lines.append(f"印厂实际材料或料号  {job['stockCode']}")
     if job['printer']:
         lines.append(f"印厂  {job['printer']}")
+    if 'factoryProfile' in job:
+        factory = job['factoryProfile']
+        lines.extend([f"产品  {factory['product']}", f"厂规  {factory['version']} · {factory['reference']}"])
     flash = {'unused': '未使用', 'artwork': '印为彩色图文', 'preview': '仅屏幕预览'}
     lines.extend([f"局部闪光  {flash[job['flashTreatment']]}", '', '工艺执行顺序'])
     for step in job['steps']:
         lines.append(f"{step['sequence']:02d}  {FACE_LABELS[step['face']]} · {step['name']}")
+        if step['materialCode']:
+            lines.append(f"    物料编号  {step['materialCode']}")
+        if step['requiresStepId']:
+            required = next(item for item in job['steps'] if item['id'] == step['requiresStepId'])
+            lines.append(f"    前置工序  {required['sequence']:02d} · {required['name']}")
         if step['method']:
             lines.append(f"    做法或材料  {step['method']}")
         if step['note']:
@@ -430,7 +609,8 @@ def encode_plate_tiff(mask, dpi):
 
 def export_package(payload):
     project, profile, pages = validate_request(payload)
-    names = SPOT_PROFILES[profile]
+    factory, names = configured_print(payload, project, pages, profile)
+    findings = read_preflight(payload)
     keys = [key for key in ALTERNATES if any(key in page['masks'] for page in pages)]
     files = {}
     for kind in ('artwork', 'composite', *keys):
@@ -467,13 +647,15 @@ def export_package(payload):
             'thresholdedMasks': page['thresholded'], 'processLayers': layer_reports,
         })
     order, die_files = build_production_order(payload.get('production'), project, page_reports)
+    if factory:
+        order['factoryProfile'] = factory
     files.update(die_files)
     files['production-order.json'] = json_bytes(order)
     files['production-order.txt'] = production_order_text(order)
     notices = [
         '本文件包为技术打样参考，尚未经过实际印厂 RIP 与实体打样验收。',
         '彩稿已栅格化为 DeviceCMYK 图像。通用 RGB 转 CMYK 未使用印厂 ICC，色彩需要印厂确认。',
-        'PDF 为普通 PDF 1.6，未声明 PDF/X 合规，也未嵌入虚构的输出条件。',
+        'PDF 为普通技术交稿 PDF，未声明 PDF/X 合规，也未嵌入虚构的输出条件。',
         '工艺蒙版使用 128 阈值转为二值，PDF 与 TIFF 共用相同的二值数据。',
         '合版 PDF 的专色按通道合并，供读版核对。layers/ 保留各工艺层，请按印厂确认的工序交付。',
         '专色分版为实地二值蒙版，实际色号请查工艺单。压凸与压凹分版仅描述平面区域，模具结构及深度由印厂确认。',
@@ -487,14 +669,15 @@ def export_package(payload):
         'verificationStatus': 'software-structure-checked', 'productionApproved': False,
         'checks': ['尺寸与正反面对齐', 'PDF 页数与 TrimBox', '专色名称与叠印属性', 'TIFF 二值数据往返一致',
                    '独立刀模 CutContour 与成品框', '工艺单与实际分版对应'],
-        'pages': page_reports, 'notices': notices,
+        'pages': page_reports, 'notices': notices, 'documentPreflight': findings,
     }
+    if factory:
+        report['factoryProfile'] = factory
     files['preflight-report.json'] = json_bytes(report)
     instructions = [
         '典藏卡技术打样文件', '', f"项目  {project['name']}", f"源版本  {project['version']:g}",
         f"成品  {project['widthMm']:g} × {project['heightMm']:g} mm",
-        f"出血  四周 {project['bleedMm']:g} mm", f"材料  {project['material']}",
-        f"底材反光  {project['stockReflection']}",
+        f"出血  四周 {project['bleedMm']:g} mm", *stock_details_text(project),
         '页序  ' + '、'.join('正面' if page['side'] == 'front' else '背面' for page in pages), '',
         'artwork.pdf 为 CMYK 彩稿。composite.pdf 为彩稿与命名专色合版。',
         '各工艺按实际使用情况输出独立纯 K 版。模切使用 die.pdf 或 die.svg。',
@@ -510,6 +693,7 @@ def export_package(payload):
     files['production-notes.txt'] = '\n'.join(instructions).encode('utf-8')
     files['manifest.json'] = json_bytes({
         'projectId': project['id'], 'version': project['version'], 'profile': profile,
+        **({'cardId': project['cardId']} if 'cardId' in project else {}),
         'files': [{'path': path, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
                   for path, data in files.items()],
     })

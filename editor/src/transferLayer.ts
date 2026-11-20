@@ -144,9 +144,13 @@ function transferProduction(project: Project, from: SideName, to: SideName, effe
 }
 
 /** Move a registered mixed group on its current face without changing outside mask users. */
-export function moveArtworkGroup(project: Project, face: SideName, groupId: string, delta: Point): CardSide | undefined {
+export function moveArtworkGroup(project: Project, face: SideName, groupId: string, delta: Point,
+  options: { previewAcrossFaces?: boolean } = {},
+): CardSide | undefined {
   const side = project[face];
-  if (!findLayerGroup(side, groupId) || !Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return undefined;
+  const group = findLayerGroup(side, groupId);
+  if (!group || (!options.previewAcrossFaces && findLayerGroup(side, group.parentId)?.autoLayout) ||
+    !Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return undefined;
   const members = layerGroupMembers(side, groupId);
   const artworkIds = new Set(members.artworkIds), effectIds = new Set(members.effectIds);
   const nodes = side.nodes.filter(node => artworkIds.has(node.id));
@@ -163,7 +167,10 @@ export function moveArtworkGroup(project: Project, face: SideName, groupId: stri
     ...effect, regionId: masks.copy(effect.regionId)!,
     maskContent: effect.maskContent?.map(node => ({ ...translate(node, delta), clipRegionId: masks.copy(node.clipRegionId) })),
   } : effect);
-  return { ...side, nodes: nextNodes, effects,
+  const groupIds = new Set(members.groups.map(item => item.id));
+  const groups = side.groups?.map(item => groupIds.has(item.id) && item.autoLayout
+    ? {...item, autoLayout:translate(item.autoLayout,delta)} : item);
+  return { ...side, nodes: nextNodes, effects, groups,
     regions: preserveSourceContours(masks.regions, nodes, new Set(masks.ids.values())) };
 }
 
@@ -203,8 +210,12 @@ export function transferGroup(project: Project, from: SideName, to: SideName, gr
         effects: origin.effects.filter(effect => !effectIds.has(effect.id)),
         regions: preserveSourceContours(origin.regions, nodes) }),
       [to]: { ...target, nodes: [...target.nodes, ...incoming], effects: [...target.effects, ...incomingEffects],
-        regions: masks.regions, groups: [...(target.groups || []), ...members.groups.map(group => ({ ...group,
-          id: groups.get(group.id)!, parentId: group.parentId ? groups.get(group.parentId) : undefined }))] },
+        regions: masks.regions, groups: [...(target.groups || []), ...members.groups.map(group => {
+          const parentId = group.parentId ? groups.get(group.parentId) : undefined;
+          return { ...group, id: groups.get(group.id)!, parentId,
+            autoLayout: group.autoLayout && translate(group.autoLayout,delta),
+            layoutItem: parentId ? group.layoutItem : undefined };
+        })] },
     },
     layerId: incoming[0]?.id ?? incomingEffects[0].id,
     groupId: groups.get(groupId)!,
@@ -231,26 +242,21 @@ export function transferArtwork(
     }
     return undefined;
   }
-  const implicitGroup = node.groupId && !findLayerGroup(origin, node.groupId) ? node.groupId : undefined;
-  const nodes = origin.nodes.filter(item => !item.locked && (item.id === nodeId || (implicitGroup && item.groupId === implicitGroup)));
-  const used = layerIds(target);
-  const moved = new Map(nodes.map(item => [item.id, availableId(used, item.id)]));
-  const group = implicitGroup
-    ? availableId(new Set([...(target.groups || []).map(item => item.id), ...target.nodes.flatMap(item => item.groupId ? [item.groupId] : [])]), implicitGroup)
-    : undefined;
-  const masks = copyRegions(project, origin, target, delta, moved);
-  const incoming = nodes.map(item => ({
-    ...translate(item, delta), id: moved.get(item.id)!, groupId: group, clipRegionId: masks.copy(item.clipRegionId),
-  }));
-  const remaining = origin.nodes.filter(item => !moved.has(item.id));
-  const regions = preserveSourceContours(origin.regions, nodes);
+  const layerId = availableId(layerIds(target), nodeId);
+  const masks = copyRegions(project, origin, target, delta, new Map([[nodeId, layerId]]));
+  const incoming = {
+    ...node, ...position, id: layerId, groupId: undefined, layoutItem: undefined,
+    clipRegionId: masks.copy(node.clipRegionId),
+  };
+  const remaining = origin.nodes.filter(item => item.id !== nodeId);
+  const regions = preserveSourceContours(origin.regions, [node]);
   return {
     project: {
       ...project,
       [from]: pruneLayerGroups({ ...origin, nodes: remaining, regions }),
-      [to]: { ...target, nodes: [...target.nodes, ...incoming], regions: masks.regions },
+      [to]: { ...target, nodes: [...target.nodes, incoming], regions: masks.regions },
     },
-    layerId: moved.get(nodeId)!,
+    layerId,
   };
 }
 
@@ -286,7 +292,9 @@ export function pasteLayerSelection(project: Project, origin: CardSide, target: 
   }
   const artwork = origin.nodes.filter(node => selected.has(node.id));
   const effects = origin.effects.filter(effect => selected.has(effect.id));
-  const bounds = [...artwork, ...effects.flatMap(effect => {
+  const layoutFrames = (origin.groups || []).flatMap(group =>
+    groupIds.has(group.id) && group.autoLayout ? [group.autoLayout] : []);
+  const bounds = [...layoutFrames, ...artwork, ...effects.flatMap(effect => {
     const region = origin.regions.find(item => item.id === effect.regionId);
     return effect.maskContent?.length ? effect.maskContent : [region?.bounds ?? origin.nodes.find(node => node.id === region?.nodeId) ?? {x:0,y:0}];
   })];
@@ -294,16 +302,23 @@ export function pasteLayerSelection(project: Project, origin: CardSide, target: 
   const ids = new Map(artwork.map(node => [node.id, replace?.artworkIds.length === 1 && artwork.length === 1 && !effects.length ? replace.artworkIds[0] : uid()]));
   const masks = copyRegions(project, origin, target, delta, ids, true);
   const parent = (id?: string) => (id && groupIds.get(id)) || replace?.parentId;
-  const incoming = artwork.map(node => ({ ...translate(node,delta), id:ids.get(node.id)!, groupId:parent(node.groupId),
-    clipRegionId:masks.copy(node.clipRegionId) }));
+  const incoming = artwork.map(node => {
+    const groupId = parent(node.groupId);
+    return { ...translate(node,delta), id:ids.get(node.id)!, groupId,
+      layoutItem: groupId ? node.layoutItem : undefined, clipRegionId:masks.copy(node.clipRegionId) };
+  });
   const incomingEffects = effects.map(effect => {
     const id = replace?.effectIds.length === 1 && effects.length === 1 && !artwork.length ? replace.effectIds[0] : uid();
     ids.set(effect.id,id);
     return { ...effect, id, groupId:parent(effect.groupId), regionId:masks.copy(effect.regionId)!,
       maskContent:effect.maskContent?.map(node => ({ ...translate(node,delta), id:uid(), clipRegionId:masks.copy(node.clipRegionId) })) };
   });
-  const groups = (origin.groups || []).filter(group => groupIds.has(group.id)).map(group => ({
-    ...group, id:groupIds.get(group.id)!, parentId:parent(group.parentId) }));
+  const groups = (origin.groups || []).filter(group => groupIds.has(group.id)).map(group => {
+    const parentId = parent(group.parentId);
+    return { ...group, id:groupIds.get(group.id)!, parentId,
+      autoLayout: group.autoLayout && translate(group.autoLayout,delta),
+      layoutItem: parentId ? group.layoutItem : undefined };
+  });
   function insertAtSelection<T extends {id:string}>(existing:T[], added:T[], removed:string[]) {
     const replaced=new Set(removed);
     const last=existing.reduce((found,item,index)=>replaced.has(item.id)?index:found,-1);

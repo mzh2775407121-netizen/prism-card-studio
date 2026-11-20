@@ -1,15 +1,20 @@
 import JSZip from 'jszip';
 import { get } from 'idb-keyval';
-import { PROCESS_LABELS, type CardNode, type CardSide, type Project } from './model';
+import {
+  PROCESS_LABELS, hydrateProject, isStockReflection, isValidProjectNote, isValidStockFinish, isValidStockSpec,
+  projectCards, serializeProject, type CardNode, type CardSide, type Project, type ProjectCard, type StoredProjectDocument,
+} from './model';
 import { MAX_LAYER_GROUP_NAME_LENGTH, MAX_LAYER_GROUPS } from './layerGroups';
 import { MAX_PATH_POINTS } from './vectorPaths';
 import { DIE_SHAPES, FACE_LABELS, MANUAL_OPERATIONS } from './production';
+import { isPrintJobProfile } from './printProfiles';
 
 const STORE_KEY = 'prism-projects';
 const MAX_PROJECT_BYTES = 100 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 24_000_000;
 const FORMAT = 'prism-cardproj';
+const ARCHIVE_VERSION = 2;
 type ArchiveEntry = { path: string; sha256: string; size: number };
 type Manifest = { format: string; version: number; files: ArchiveEntry[] };
 
@@ -146,6 +151,7 @@ function validateNode(node: unknown): asserts node is CardNode {
   assert(isObject(node) && text(node.id) && node.id.length > 0, '图层标识缺失。');
   assert(text(node.name) && ['empty', 'image', 'text', 'rect', 'ellipse', 'polygon', 'line', 'path'].includes(String(node.type)), '图层类型或名称无效。');
   assert(number(node.x) && number(node.y) && number(node.width, 0.001, 100_000) && number(node.height, 0.001, 100_000) && number(node.rotation), '图层位置或尺寸无效。');
+  validateLayoutItem(node.layoutItem);
   assert((node.flipX === undefined || typeof node.flipX === 'boolean') &&
     (node.flipY === undefined || typeof node.flipY === 'boolean'), '图层翻转状态无效。');
   assert(number(node.opacity, 0, 1) && typeof node.visible === 'boolean' && typeof node.locked === 'boolean' && text(node.fill), '图层外观数据无效。');
@@ -208,6 +214,24 @@ function validateCrop(crop: unknown) {
   if (crop.space !== undefined) assert(crop.space === 'source' && crop.x + crop.width <= 1.00001 && crop.y + crop.height <= 1.00001, '图片裁切超出原图。');
 }
 
+function validateLayoutItem(item: unknown) {
+  if (item === undefined) return;
+  const modeAllowed = (mode: unknown) => mode === undefined || mode === 'fixed' || mode === 'hug' || mode === 'fill';
+  assert(isObject(item) && modeAllowed(item.widthMode) && modeAllowed(item.heightMode), '自动布局子项的尺寸模式无效。');
+}
+
+function validateAutoLayout(layout: unknown) {
+  if (layout === undefined) return;
+  const frameMode = (mode: unknown) => mode === 'fixed' || mode === 'hug';
+  assert(isObject(layout) && number(layout.x) && number(layout.y) && number(layout.width, 0.001, 100_000) &&
+    number(layout.height, 0.001, 100_000) && (layout.direction === 'vertical' || layout.direction === 'horizontal') &&
+    frameMode(layout.widthMode) && frameMode(layout.heightMode) &&
+    (layout.align === 'start' || layout.align === 'center' || layout.align === 'end') &&
+    number(layout.gap, 0, 100_000), '自动布局组的尺寸或方向无效。');
+  const insets = layout.padding;
+  assert(isObject(insets) && ['top', 'right', 'bottom', 'left'].every(edge => number(insets[edge], 0, 100_000)), '自动布局的内边距无效。');
+}
+
 function validateLayerGroups(value: unknown, artworkIds: Set<string>, effectIds: Set<string>) {
   assert(Array.isArray(value) && value.length <= MAX_LAYER_GROUPS, '编组数据无效。');
   const parents = new Map<string, string | undefined>();
@@ -216,6 +240,8 @@ function validateLayerGroups(value: unknown, artworkIds: Set<string>, effectIds:
       !artworkIds.has(group.id) && !effectIds.has(group.id), '编组标识缺失或重复。');
     assert(text(group.name, MAX_LAYER_GROUP_NAME_LENGTH) && group.name.trim(), '编组名称无效。');
     assert(group.parentId === undefined || (text(group.parentId) && group.parentId.trim()), '上级编组无效。');
+    validateLayoutItem(group.layoutItem);
+    validateAutoLayout(group.autoLayout);
     parents.set(group.id, group.parentId);
   }
   const checked = new Set<string>();
@@ -231,6 +257,7 @@ function validateLayerGroups(value: unknown, artworkIds: Set<string>, effectIds:
 
 function validateSide(value: unknown): asserts value is CardSide {
   assert(isObject(value), '卡片正反面数据不完整。');
+  if (value.stockFinish !== undefined) assert(isValidStockFinish(value.stockFinish), '卡面反光参数无效。');
   if (value.reference !== undefined) {
     const reference = value.reference;
     assert(isObject(reference) && text(reference.name) && text(reference.src, MAX_IMAGE_BYTES * 1.5) && reference.src.length > 0, '参考图数据无效。');
@@ -299,6 +326,7 @@ function validateSide(value: unknown): asserts value is CardSide {
     assert(text(effect.name) && ['holo', 'gold', 'silver', 'gloss', 'emboss', 'grain', 'white'].includes(String(effect.type)), '效果类型无效。');
     assert(text(effect.regionId) && regionIds.has(effect.regionId), '效果引用的作用区域已缺失。');
     if (effect.process !== undefined) assert(Object.hasOwn(PROCESS_LABELS, String(effect.process)), '工艺类型无效。');
+    if (effect.productionEnabled !== undefined) assert(typeof effect.productionEnabled === 'boolean', '工艺输出状态无效。');
     if (effect.pattern !== undefined) assert(['linear','radial','grain'].includes(String(effect.pattern)), '闪光纹样无效。');
     if (effect.flashStyle !== undefined) assert(['cosmos','geometric','glitter','linear','radial'].includes(String(effect.flashStyle)), '局部闪光样式无效。');
     if (effect.groupId !== undefined) assert(text(effect.groupId) && effect.groupId.trim(), '工艺图层编组标识无效。');
@@ -316,17 +344,19 @@ function validateSide(value: unknown): asserts value is CardSide {
   if (value.groups !== undefined) validateLayerGroups(value.groups, ids, effectIds);
 }
 
-function validateProject(value: unknown): asserts value is Project {
-  assert(isObject(value) && text(value.id) && value.id.length > 0 && text(value.name, 500), '项目名称或标识无效。');
-  assert(number(value.version, 1) && Number.isInteger(value.version), '项目版本号无效。');
+function validateCardDesign(value: unknown) {
+  assert(isObject(value), '卡牌数据无效。');
   assert(number(value.widthMm, 10, 500) && number(value.heightMm, 10, 500) && number(value.bleedMm, 0, 20), '卡片尺寸应在 10–500 mm 之间，出血在 0–20 mm 之间。');
   if (value.cornerRadiusMm !== undefined) assert(number(value.cornerRadiusMm, 0, Math.min(value.widthMm, value.heightMm) / 2), '卡片圆角半径超出范围。');
-  assert(text(value.material) && number(value.updatedAt, 0, Number.MAX_SAFE_INTEGER), '项目材质或保存时间无效。');
+  if (value.singleSided !== undefined) assert(typeof value.singleSided === 'boolean', '卡牌面数无效。');
+  assert(text(value.material), '卡牌材质无效。');
   if (value.previewStyle !== undefined) assert(['cosmos', 'geometric', 'glitter', 'original'].includes(String(value.previewStyle)), '预览样式无效。');
-  if (value.stockReflection !== undefined) assert(['none','mirror','rainbow','radial'].includes(String(value.stockReflection)), '底材反光类型无效。');
+  if (value.stockReflection !== undefined) assert(isStockReflection(value.stockReflection), '底材反光类型无效。');
+  if (value.stockSpec !== undefined) assert(isValidStockSpec(value.stockSpec), '卡基规格无效。');
   if (value.production !== undefined) {
     const plan = value.production;
     assert(isObject(plan) && Object.hasOwn(DIE_SHAPES, String(plan.dieShape)) && Array.isArray(plan.steps) && plan.steps.length <= 250, '工艺单格式无效。');
+    if (plan.printProfile !== undefined) assert(isPrintJobProfile(plan.printProfile), '印厂配置无效。');
     for (const [key, limit] of [['printer', 120], ['stockCode', 120], ['note', 1200]] as const) {
       assert(plan[key] === undefined || text(plan[key], limit), '工艺单说明无效。');
     }
@@ -336,6 +366,8 @@ function validateProject(value: unknown): asserts value is Project {
         (['artwork', 'layer', 'die'].includes(String(row.kind)) || Object.hasOwn(MANUAL_OPERATIONS, String(row.kind))) &&
         Object.hasOwn(FACE_LABELS, String(row.face)) && text(row.name, 300) &&
         (row.layerId === undefined || text(row.layerId)) &&
+        (row.materialCode === undefined || text(row.materialCode, 120)) &&
+        (row.requiresStepId === undefined || text(row.requiresStepId, 330)) &&
         (row.method === undefined || text(row.method, 120)) && (row.note === undefined || text(row.note, 600)), '工序内容无效。');
       ids.add(row.id);
     }
@@ -344,8 +376,28 @@ function validateProject(value: unknown): asserts value is Project {
   validateSide(value.back);
 }
 
-function imageNodes(project: Project): { src?: string }[] {
-  const assets = [project.front, project.back].flatMap(side => {
+function validateProject(value: unknown, archiveVersion: number): asserts value is Project | StoredProjectDocument {
+  assert(isObject(value) && text(value.id) && value.id.length > 0 && text(value.name, 500), '项目名称或标识无效。');
+  assert(isValidProjectNote(value.note), '项目备注无效。');
+  assert(number(value.version, 1) && Number.isInteger(value.version), '项目版本号无效。');
+  assert(number(value.updatedAt, 0, Number.MAX_SAFE_INTEGER), '项目保存时间无效。');
+  if (archiveVersion === 1) {
+    assert(value.cards === undefined && value.additionalCards === undefined, '项目包版本与卡牌数据不符。');
+    validateCardDesign(value);
+    return;
+  }
+  assert(Array.isArray(value.cards) && value.cards.length > 0, '项目缺少卡牌。');
+  const ids = new Set<string>();
+  for (const card of value.cards) {
+    assert(isObject(card) && text(card.id, 302) && !!card.id.trim() && !ids.has(card.id) &&
+      text(card.name, 500) && !!card.name.trim(), '卡牌名称或标识无效。');
+    ids.add(card.id);
+    validateCardDesign(card);
+  }
+}
+
+function imageNodes(cards: ProjectCard[]): { src?: string }[] {
+  const assets = cards.flatMap(card => [card.front, card.back]).flatMap(side => {
     const nodes = [...side.nodes, ...side.effects.flatMap(effect => effect.maskContent ?? []),
       ...side.regions.flatMap(region => region.snapshot ? [region.snapshot] : [])];
     return [...nodes.flatMap(node => [
@@ -368,9 +420,9 @@ async function localSource(src: string): Promise<Uint8Array> {
   return bytes;
 }
 
-export async function exportProject(project: Project): Promise<void> {
-  validateProject(project);
-  const snapshot = structuredClone(project);
+export async function buildProjectArchive(project: Project): Promise<Blob> {
+  const snapshot = structuredClone(serializeProject(project));
+  validateProject(snapshot, ARCHIVE_VERSION);
   const zip = new JSZip();
   const entries: ArchiveEntry[] = [];
   const sources = new Map<string, string>();
@@ -381,7 +433,7 @@ export async function exportProject(project: Project): Promise<void> {
     zip.file(path, bytes);
     entries.push({ path, sha256: await sha256(bytes), size: bytes.byteLength });
   }
-  for (const node of imageNodes(snapshot)) {
+  for (const node of imageNodes(snapshot.cards)) {
     if (!node.src) continue;
     const original = node.src;
     let path = sources.get(original);
@@ -397,15 +449,19 @@ export async function exportProject(project: Project): Promise<void> {
 
   const encoder = new TextEncoder();
   await add('document.json', encoder.encode(JSON.stringify(snapshot)));
-  await add('schema.json', encoder.encode(JSON.stringify({ format: FORMAT, version: 1, coordinateUnits: '0.1mm' })));
+  await add('schema.json', encoder.encode(JSON.stringify({ format: FORMAT, version: ARCHIVE_VERSION, coordinateUnits: '0.1mm' })));
   const fontResponse = await fetch('/assets/work-sans-variable.woff2');
   assert(fontResponse.ok, '项目字体读取失败，请重试。');
   await add('fonts/work-sans-variable.woff2', new Uint8Array(await fontResponse.arrayBuffer()));
   const licenseResponse = await fetch('/assets/WorkSans-OFL.txt');
   assert(licenseResponse.ok, '字体授权文件读取失败，请重试。');
   await add('fonts/WorkSans-OFL.txt', new Uint8Array(await licenseResponse.arrayBuffer()));
-  zip.file('manifest.json', JSON.stringify({ format: FORMAT, version: 1, files: entries }, null, 2));
-  downloadBlob(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } }), `${snapshot.name}.cardproj`);
+  zip.file('manifest.json', JSON.stringify({ format: FORMAT, version: ARCHIVE_VERSION, files: entries }, null, 2));
+  return zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 5 } });
+}
+
+export async function exportProject(project: Project): Promise<void> {
+  downloadBlob(await buildProjectArchive(project), `${project.name}.cardproj`);
 }
 
 export async function importProject(file: File): Promise<Project> {
@@ -434,8 +490,9 @@ export async function importProject(file: File): Promise<Project> {
     schema = JSON.parse(await schemaFile.async('string'));
     manifest = JSON.parse(await manifestFile.async('string')) as Manifest;
   } catch { throw new Error('项目包说明文件损坏。'); }
-  assert(isObject(schema) && schema.format === FORMAT && schema.version === 1 && schema.coordinateUnits === '0.1mm', '项目包版本暂不支持，请使用版本 1 的 .cardproj 文件。');
-  assert(isObject(manifest) && manifest.format === FORMAT && manifest.version === 1 && Array.isArray(manifest.files), '项目包校验清单无效。');
+  assert(isObject(schema) && schema.format === FORMAT && (schema.version === 1 || schema.version === ARCHIVE_VERSION)
+    && schema.coordinateUnits === '0.1mm', '项目包版本暂不支持，请使用版本 1 或 2 的 .cardproj 文件。');
+  assert(isObject(manifest) && manifest.format === FORMAT && manifest.version === schema.version && Array.isArray(manifest.files), '项目包校验清单无效。');
   assert(manifest.files.length === files.length - 1 && manifest.files.length <= 2199, '项目包校验清单的文件数量不符。');
   const checked = new Map<string, Uint8Array>();
   let actualSize = 0;
@@ -453,9 +510,9 @@ export async function importProject(file: File): Promise<Project> {
   let project: unknown;
   try { project = JSON.parse(new TextDecoder().decode(checked.get('document.json'))); }
   catch { throw new Error('项目文档损坏。'); }
-  validateProject(project);
+  validateProject(project, schema.version);
   const embedded = new Map<string, string>();
-  for (const node of imageNodes(project)) {
+  for (const node of imageNodes('cards' in project ? project.cards : projectCards(project))) {
     const path = node.src || '';
     assert(/^assets\/[a-zA-Z0-9_.-]+$/.test(path) && checked.has(path), '项目图片缺失或引用了包外文件。');
     let src = embedded.get(path);
@@ -466,5 +523,5 @@ export async function importProject(file: File): Promise<Project> {
     node.src = src;
   }
 
-  return project;
+  return hydrateProject(project);
 }

@@ -7,7 +7,8 @@
   min-height: 27px;
   padding: 3px 7px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
+  corner-shape: var(--prism-corner);
   background: var(--inspector-field, #3c3c3c);
   color: var(--inspector-text, #f1f1f1);
   font: inherit;
@@ -47,7 +48,8 @@
   box-sizing: border-box;
   padding: 4px 4px 6px;
   border: 1px solid #505050;
-  border-radius: 12px;
+  border-radius: var(--radius-panel);
+  corner-shape: var(--prism-corner);
   background: #373737;
   box-shadow: 0 6px 24px rgb(0 0 0 / 20%);
   color: #f1f1f1;
@@ -63,7 +65,8 @@
 .inspector-menu-popup[data-variant=action] {
   padding: 0;
   border-color: #3e3e3e;
-  border-radius: 8px;
+  border-radius: var(--radius-item);
+  corner-shape: var(--prism-corner);
   background: #2c2c2c;
   box-shadow: 0 4px 12px rgb(0 0 0 / 32%);
 }
@@ -87,7 +90,8 @@
   height: 27px;
   min-height: 27px;
   padding: 5px 7px;
-  border-radius: 5px;
+  border-radius: var(--radius-control);
+  corner-shape: var(--prism-corner);
   background: transparent;
   color: #f1f1f1;
   cursor: pointer;

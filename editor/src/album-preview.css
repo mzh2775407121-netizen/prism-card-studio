@@ -10,7 +10,7 @@
   --preview-padding: 22px;
   --preview-arena-height: clamp(130px, min(78svh, 100svh - 206px), 820px);
   padding: var(--preview-padding);
-  background: #e9e9e9;
+  background: var(--preview-background, #e9e9e9);
   color: #292929;
   --inspector-muted: #515151;
   transition: background .22s ease-out;
@@ -23,9 +23,7 @@
   z-index: 2;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  color: var(--inspector-muted);
-  font-size: 13px;
+  justify-content: flex-end;
 }
 .prism-card-inspector .inspector-icon {
   display: inline-flex;
@@ -36,6 +34,7 @@
   height: 44px;
   padding: 0;
   border-radius: 50%;
+  corner-shape: round;
   transition: background .2s;
 }
 .prism-card-inspector .inspector-icon:hover:not(:disabled) { background: #d9d9d9; }
@@ -46,7 +45,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  perspective: 1400px;
   margin: 4px 0 8px;
 }
 .prism-card-inspector .card-flight {
@@ -72,7 +70,7 @@
 }
 .prism-card-inspector .card-flight .card__translater {
   transform: none;
-  perspective: 1400px;
+  perspective: var(--preview-perspective, 1400px);
 }
 .prism-card-inspector .card-flight .card__rotator {
   width: 100%;
@@ -81,12 +79,9 @@
   touch-action: none;
   isolation: auto;
   overflow: visible;
+  corner-shape: round;
   transition: none;
-}
-.prism-card-inspector .card-flight .card.active .card__rotator {
-  box-shadow: 0 0 3px -1px white, 0 0 3px 1px var(--card-edge),
-    0 0 12px 2px var(--card-glow), 0 10px 20px -5px #000,
-    0 0 40px -30px var(--card-glow), 0 0 50px -20px var(--card-glow);
+  box-shadow: 0 10px 20px -5px rgb(0 0 0 / 35%);
 }
 .prism-card-inspector .card-flight .card__rotator:focus-visible {
   outline: 2px solid var(--prism-blue);
@@ -106,14 +101,10 @@
 .prism-card-inspector .card-flight .inspector-card-face.back {
   transform: rotateY(180deg) translateZ(.01px);
 }
-.prism-card-inspector .card-flight .inspector-card-face img {
+.prism-card-inspector .card-flight .inspector-card-face canvas {
   width: 100%;
   height: 100%;
   object-fit: fill;
-}
-.prism-card-inspector .inspector-card-face .card__glare {
-  mask: var(--glare-mask) center / 100% 100% no-repeat;
-  opacity: calc(var(--card-opacity) * .52);
 }
 .prism-card-inspector .inspector-chrome { transition: opacity .2s ease-out; }
 .prism-card-inspector .inspector[data-phase="loading"] :is(.inspect-info, .inspect-bottom) {
@@ -121,9 +112,7 @@
   pointer-events: none;
 }
 .prism-card-inspector .inspector[data-phase="entering"] .inspector-chrome { opacity: 0; }
-.prism-card-inspector .inspector[data-phase="entering"] .inspector-actions,
-.prism-card-inspector .inspector[data-phase="closing"] .inspector-chrome { pointer-events: none; }
-.prism-card-inspector .inspector[data-phase="closing"] .inspector-chrome { opacity: 0; }
+.prism-card-inspector .inspector[data-phase="closing"] .inspector-chrome { opacity: 0; pointer-events: none; }
 .prism-card-inspector .inspect-info {
   display: flex;
   align-items: center;
@@ -151,12 +140,6 @@
   gap: 12px;
   padding: 4px 16px 0;
 }
-.prism-card-inspector .inspector-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.prism-card-inspector .inspector-text,
 .prism-card-inspector .inspector-retry {
   min-height: 34px;
   padding: 4px 8px;
@@ -167,18 +150,12 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.prism-card-inspector .inspector-text:hover,
 .prism-card-inspector .inspector-retry:hover {
   border-color: #cdcdcd;
   background: #e4e4e4;
 }
-.prism-card-inspector .inspector-text[aria-pressed="true"] {
-  border-color: var(--prism-blue);
-  background: var(--prism-selected-surface);
-}
 @media (max-width: 650px) {
   .prism-card-inspector.inspector-backdrop { --preview-padding: 18px; }
-  .prism-card-inspector .inspector-top { font-size: 12px; }
   .prism-card-inspector .inspect-info, .prism-card-inspector .inspect-bottom { padding-inline: 5px; }
   .prism-card-inspector .inspect-info h2 { font-size: 23px; }
   .prism-card-inspector .inspect-info p, .prism-card-inspector .inspect-bottom p { font-size: 11px; }

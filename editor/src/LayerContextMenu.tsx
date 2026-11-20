@@ -1,10 +1,12 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
 import './layer-context-menu.css';
 
 export type MenuPoint = {x:number;y:number};
-export interface LayerCommand { label:string; shortcut?:string; enabled:boolean; run:()=>void }
+export interface LayerCommand { label:string; shortcut?:string; icon?:ReactNode; enabled:boolean; run:()=>void }
 
-export function LayerContextMenu({screen,commands,close}:{screen:MenuPoint;commands:LayerCommand[];close:()=>void}) {
+export function LayerContextMenu({screen,commands,close,label='图层操作',onKeyboardClose}:{
+  screen:MenuPoint; commands:LayerCommand[]; close:()=>void; label?:string; onKeyboardClose?:()=>void;
+}) {
   const ref=useRef<HTMLDivElement>(null);
   useLayoutEffect(()=>{
     const menu=ref.current!;
@@ -19,9 +21,12 @@ export function LayerContextMenu({screen,commands,close}:{screen:MenuPoint;comma
     window.addEventListener('resize',close);
     return ()=>{window.removeEventListener('pointerdown',outside,true);window.removeEventListener('blur',close);window.removeEventListener('resize',close)};
   },[close]);
-  return <div ref={ref} role="menu" aria-label="图层操作" className="layer-context-menu" tabIndex={-1}
+  return <div ref={ref} role="menu" aria-label={label} className="layer-context-menu" tabIndex={-1}
     onContextMenu={event=>event.preventDefault()} onKeyDown={event=>{
-      if(['Escape','Tab'].includes(event.key)){event.stopPropagation();close();return}
+      if(event.key==='Escape'||event.key==='Tab'){
+        if(event.key==='Escape'&&onKeyboardClose)event.preventDefault();
+        event.stopPropagation();onKeyboardClose?.();close();return;
+      }
       if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;
       event.preventDefault();event.stopPropagation();
       const items=Array.from(ref.current!.querySelectorAll<HTMLButtonElement>('button:enabled'));
@@ -31,7 +36,7 @@ export function LayerContextMenu({screen,commands,close}:{screen:MenuPoint;comma
     }}>
     {commands.map((cmd,index)=><div key={cmd.label} className={index===3||index===6?'menu-divider':undefined}>
       <button type="button" role="menuitem" disabled={!cmd.enabled} onClick={()=>{cmd.run();close()}}>
-        {cmd.label}<span>{cmd.shortcut}</span>
+        {cmd.icon?<span className="menu-item-label">{cmd.icon}{cmd.label}</span>:cmd.label}<span>{cmd.shortcut}</span>
       </button>
     </div>)}
   </div>;

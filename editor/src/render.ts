@@ -1,6 +1,8 @@
-import { FLASH_STYLES, getFlashStyle, getStockReflection, plateFor, processKind, processLayerEnabled, pentagon, type CardNode, type CardSide, type Effect, type Project, type Region, type SideName } from './model';
+import { FLASH_STYLES, getCardCornerRadiusMm, getFlashStyle, plateFor, processKind, processLayerEnabled, effectInProduction, pentagon, type CardNode, type CardSide, type Effect, type Project, type Region, type SideName } from './model';
 import { activeImageFill, fillType, gradientPoints, hasFill, hasStroke } from './layerAppearance';
 import { isOpenVector, traceVectorPath } from './vectorPaths';
+import { getStockAppearance, paintStockOptics, REST_STOCK_LIGHT, stockBlendMode, stockFinishVisible, stockGroundColor, type StockOptics } from './stockOptics';
+import { isTransparentStock } from './stockMaterials';
 
 const imagePromises = new Map<string, Promise<HTMLImageElement>>();
 
@@ -287,16 +289,17 @@ export async function drawNode(context: CanvasRenderingContext2D, node: CardNode
   drawArtwork(context, node, image);
   context.restore();
 }
-export async function renderRegionMask(project: Project, side: CardSide, region: Region, scale = 1, visited = new Set<string>(), cached = new Map<string, HTMLCanvasElement>()): Promise<HTMLCanvasElement> {
+export async function renderRegionMask(project: Project, side: CardSide, region: Region, scale = 1, visited = new Set<string>(), cached = new Map<string, HTMLCanvasElement>(), includeBleed = false): Promise<HTMLCanvasElement> {
   const existing = cached.get(region.id);
   if (existing) return existing;
   const width = project.widthMm * 10;
   const height = project.heightMm * 10;
-  const canvas = makeCanvas(width * scale, height * scale);
+  const bleed = includeBleed ? project.bleedMm * 10 : 0;
+  const canvas = makeCanvas((width + bleed * 2) * scale, (height + bleed * 2) * scale);
   const context = canvas.getContext('2d')!;
-  context.scale(scale, scale);
+  context.setTransform(scale, 0, 0, scale, bleed * scale, bleed * scale);
   context.fillStyle = '#ffffff';
-  if (region.kind === 'full') context.fillRect(0, 0, width, height);
+  if (region.kind === 'full') context.fillRect(-bleed, -bleed, width + bleed * 2, height + bleed * 2);
   if (region.kind === 'border') {
     context.fillRect(16, 16, width - 32, height - 32);
     context.clearRect(25, 25, width - 50, height - 50);
@@ -310,10 +313,12 @@ export async function renderRegionMask(project: Project, side: CardSide, region:
       const clip = side.regions.find(item => item.id === node.clipRegionId);
       const branch = new Set(visited).add(region.id);
       if (clip && !branch.has(clip.id) && branch.size < 16) {
-        const cutout = await renderRegionMask(project, side, clip, scale, branch, cached);
+        const cutout = await renderRegionMask(project, side, clip, scale, branch, cached, includeBleed);
+        context.save();
+        context.resetTransform();
         context.globalCompositeOperation = 'destination-in';
-        context.drawImage(cutout, 0, 0, width, height);
-        context.globalCompositeOperation = 'source-over';
+        context.drawImage(cutout, 0, 0);
+        context.restore();
       }
     } else if (region.bounds) {
       context.save();
@@ -348,8 +353,11 @@ export async function renderRegionMask(project: Project, side: CardSide, region:
     for (const id of region.sources || []) {
       const source = side.regions.find(item => item.id === id);
       if (!source || branch.has(id)) continue;
-      const part = await renderRegionMask(project, side, source, scale, branch, cached);
-      context.drawImage(part, 0, 0, width, height);
+      const part = await renderRegionMask(project, side, source, scale, branch, cached, includeBleed);
+      context.save();
+      context.resetTransform();
+      context.drawImage(part, 0, 0);
+      context.restore();
     }
   }
   for (const stroke of region.strokes) {
@@ -392,14 +400,15 @@ export async function renderRegionMask(project: Project, side: CardSide, region:
   return canvas;
 }
 
-export async function renderEffectMask(project: Project, side: CardSide, effect: Effect, scale = 1) {
+export async function renderEffectMask(project: Project, side: CardSide, effect: Effect, scale = 1, includeBleed = false) {
+  const bleed = includeBleed ? project.bleedMm * 10 : 0;
   const region = side.regions.find(item => item.id === effect.regionId);
-  const area = region && await renderRegionMask(project, side, region, scale);
-  if (!area) return makeCanvas(project.widthMm * 10 * scale, project.heightMm * 10 * scale);
+  const area = region && await renderRegionMask(project, side, region, scale, new Set(), new Map(), includeBleed);
+  if (!area) return makeCanvas((project.widthMm * 10 + bleed * 2) * scale, (project.heightMm * 10 + bleed * 2) * scale);
   if (effect.maskContent === undefined) return area;
   const mask = makeCanvas(area.width, area.height);
   const context = mask.getContext('2d')!;
-  context.scale(scale, scale);
+  context.setTransform(scale, 0, 0, scale, bleed * scale, bleed * scale);
   for (const node of effect.maskContent) {
     if (node.type !== 'image' || node.maskInk !== 'dark' || !node.visible) {
       await drawNode(context, node, true);
@@ -407,7 +416,7 @@ export async function renderEffectMask(project: Project, side: CardSide, effect:
     }
     const image = makeCanvas(mask.width, mask.height);
     const ink = image.getContext('2d', { willReadFrequently: true })!;
-    ink.scale(scale, scale);
+    ink.setTransform(scale, 0, 0, scale, bleed * scale, bleed * scale);
     await drawNode(ink, node, true);
     const pixels = ink.getImageData(0, 0, image.width, image.height);
     for (let i=0;i<pixels.data.length;i+=4) {
@@ -415,7 +424,10 @@ export async function renderEffectMask(project: Project, side: CardSide, effect:
       pixels.data[i+3] *= (255-luma)/255;
     }
     ink.putImageData(pixels,0,0);
-    context.drawImage(image,0,0,mask.width/scale,mask.height/scale);
+    context.save();
+    context.resetTransform();
+    context.drawImage(image, 0, 0);
+    context.restore();
   }
   context.resetTransform();
   context.globalCompositeOperation = 'destination-in';
@@ -523,52 +535,50 @@ async function paintLocalFlash(project: Project, context: CanvasRenderingContext
   context.globalCompositeOperation = 'source-over';
 }
 
-async function renderMaterial(project: Project, side: CardSide, scale: number, light: number) {
-  const width = project.widthMm * 10;
-  const height = project.heightMm * 10;
-  const canvas = makeCanvas(width * scale, height * scale);
-  const context = canvas.getContext('2d')!;
-  context.scale(scale, scale);
-  const stock = getStockReflection(project);
-  if (stock !== 'none') {
-    context.globalAlpha = stock === 'mirror' ? .11 : .16;
-    paintFinish(context, { id: 'material', name: 'material', type: stock === 'mirror' ? 'silver' : 'holo',
-      pattern: stock === 'radial' ? 'radial' : 'linear', regionId: '', opacity: 1, angle: 115, visible: true }, width, height, light);
-    context.globalAlpha = 1;
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    // Opaque white ink prevents the metallic stock showing through that area.
-    context.globalCompositeOperation = 'destination-out';
-    for (const effect of side.effects) {
-      if (processKind(effect) !== 'white' || !processLayerEnabled(effect)) continue;
-      context.drawImage(await renderEffectMask(project, side, effect, scale), 0, 0);
-    }
-  } else {
-    context.fillStyle = project.material === 'black' ? 'rgba(9,20,23,.035)' : 'rgba(246,238,218,.025)';
-    context.fillRect(0, 0, width, height);
-    let seed = 37219;
-    for (let index = 0; index < 1800; index++) {
-      seed = seed * 16807 % 2147483647;
-      const x = seed / 2147483647 * width;
-      seed = seed * 16807 % 2147483647;
-      const y = seed / 2147483647 * height;
-      context.fillStyle = index % 2 ? 'rgba(255,255,255,.045)' : 'rgba(0,0,0,.025)';
-      context.fillRect(x, y, .7, .7);
-    }
-  }
-  return canvas;
+export async function renderStockWhiteMask(project: Project, side: CardSide, scale: number, includeBleed = false) {
+  const white = side.effects.filter(effect => processKind(effect) === 'white' && processLayerEnabled(effect));
+  const masks = await Promise.all(white.map(effect => renderEffectMask(project, side, effect, scale, includeBleed)));
+  if (!masks.length) return;
+  const whiteMask = makeCanvas(masks[0].width, masks[0].height);
+  const context = whiteMask.getContext('2d')!;
+  for (const mask of masks) context.drawImage(mask, 0, 0);
+  context.globalCompositeOperation = 'source-in';
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, whiteMask.width, whiteMask.height);
+  return whiteMask;
 }
 
-export async function renderEffects(project: Project, side: CardSide, scale = 1, light = 0, material = true, localFlash = true) {
-  const width = project.widthMm * 10;
-  const height = project.heightMm * 10;
+export async function prepareStockOptics(project: Project, side: CardSide, scale: number, includeBleed = false): Promise<StockOptics | undefined> {
+  const finish = getStockAppearance(project, side);
+  if (!stockFinishVisible(finish)) return;
+  const bleed = includeBleed ? project.bleedMm * 10 : 0;
+  const radius = getCardCornerRadiusMm(project) * 10;
+  const roundedBleed = radius > 0 && (!project.production || project.production.dieShape === 'card');
+  const cornerRadius = (includeBleed ? (roundedBleed ? radius + bleed : 0) : radius) * scale;
+  const whiteMask = await renderStockWhiteMask(project, side, scale, includeBleed);
+  return { finish, cornerRadius, whiteMask };
+}
+
+export async function renderStockReflection(project: Project, side: CardSide, scale: number, includeBleed = false) {
+  const optics = await prepareStockOptics(project, side, scale, includeBleed);
+  if (!optics) return;
+  const margin = includeBleed ? project.bleedMm * 20 : 0;
+  const canvas = makeCanvas((project.widthMm * 10 + margin) * scale, (project.heightMm * 10 + margin) * scale);
+  paintStockOptics(canvas.getContext('2d')!, optics, REST_STOCK_LIGHT);
+  return { canvas, opacity: optics.finish.opacity, blend: stockBlendMode(optics.finish) };
+}
+
+export async function renderEffects(project: Project, side: CardSide, scale = 1, light = 0, localFlash = true, includeBleed = false) {
+  const margin = includeBleed ? project.bleedMm * 20 : 0;
+  const width = project.widthMm * 10 + margin;
+  const height = project.heightMm * 10 + margin;
   const output = makeCanvas(width * scale, height * scale);
   const outputContext = output.getContext('2d')!;
-  if (material) outputContext.drawImage(await renderMaterial(project, side, scale, light), 0, 0);
   for (const effect of side.effects) {
     const kind = processKind(effect);
     if (!effect.visible || effect.opacity <= 0 || kind === 'white' || kind === 'primer' || kind === 'spot' ||
         (kind === 'reflection' && !localFlash)) continue;
-    const mask = await renderEffectMask(project, side, effect, scale);
+    const mask = await renderEffectMask(project, side, effect, scale, includeBleed);
     const layer = makeCanvas(output.width, output.height);
     const context = layer.getContext('2d')!;
     context.scale(scale, scale);
@@ -589,10 +599,74 @@ export function effectBelongsToPlate(effect: Effect, plate: string) {
 
 export interface RenderCardOptions {
   scale?: number; effects?: boolean; plate?: string; layerId?: string; transparentGround?: boolean; bleed?: boolean; light?: number;
+  productionOnly?: boolean;
   /** Preview substrate simulation; disable when baking digital effects for print. */
   material?: boolean;
   /** Disable when local flash is rendered as separate, interactive layers. */
   localFlash?: boolean;
+}
+
+async function drawStockGround(context: CanvasRenderingContext2D, project: Project, side: CardSide, scale: number, bleed = false) {
+  const { width, height } = context.canvas;
+  context.save();
+  context.resetTransform();
+  context.fillStyle = stockGroundColor(project.material, getStockAppearance(project, side));
+  context.fillRect(0, 0, width, height);
+  if (isTransparentStock(project.material)) {
+    const backing = await renderStockWhiteMask(project, side, scale, bleed);
+    if (backing) context.drawImage(backing, 0, 0);
+  }
+  context.restore();
+}
+
+export async function renderStockGround(project: Project, side: CardSide, scale: number) {
+  const canvas = makeCanvas(project.widthMm * 10 * scale, project.heightMm * 10 * scale);
+  await drawStockGround(canvas.getContext('2d')!, project, side, scale);
+  return canvas;
+}
+
+async function drawCardArtwork(context: CanvasRenderingContext2D, project: Project, side: CardSide, scale: number,
+  nodes = side.nodes, includeBleed = false, cached = new Map<string, HTMLCanvasElement>()) {
+  const bleed = includeBleed ? project.bleedMm * 10 : 0;
+  for (const node of nodes) {
+    if (!node.visible || node.type === 'empty') continue;
+    const clip = node.clipRegionId && side.regions.find(region => region.id === node.clipRegionId);
+    if (!clip) { await drawNode(context, node); continue; }
+    const area = await renderRegionMask(project, side, clip, scale, new Set(), cached, includeBleed);
+    const clipped = makeCanvas(area.width, area.height);
+    const target = clipped.getContext('2d')!;
+    target.setTransform(scale, 0, 0, scale, bleed * scale, bleed * scale);
+    await drawNode(target, { ...node, blend: undefined });
+    target.resetTransform();
+    target.globalCompositeOperation = 'destination-in';
+    target.drawImage(area, 0, 0);
+    context.save();
+    context.resetTransform();
+    context.globalCompositeOperation = (node.blend || 'source-over') as GlobalCompositeOperation;
+    context.drawImage(clipped, 0, 0);
+    context.restore();
+  }
+}
+
+export async function renderArtworkLayers(project: Project, side: CardSide, scale: number) {
+  const passes: { nodes: CardNode[]; blend: GlobalCompositeOperation }[] = [];
+  for (const node of side.nodes) {
+    if (!node.visible || node.type === 'empty' || node.opacity <= 0) continue;
+    const blend = (node.blend || 'source-over') as GlobalCompositeOperation;
+    const previous = passes.at(-1);
+    if (blend === 'source-over' && previous?.blend === blend) previous.nodes.push(node);
+    else passes.push({ nodes: [blend === 'source-over' ? node : { ...node, blend: undefined }], blend });
+  }
+  const masks = new Map<string, HTMLCanvasElement>();
+  const layers: { canvas: HTMLCanvasElement; blend: GlobalCompositeOperation }[] = [];
+  for (const { nodes, blend } of passes) {
+    const canvas = makeCanvas(project.widthMm * 10 * scale, project.heightMm * 10 * scale);
+    const context = canvas.getContext('2d')!;
+    context.scale(scale, scale);
+    await drawCardArtwork(context, project, side, scale, nodes, false, masks);
+    layers.push({ canvas, blend });
+  }
+  return layers;
 }
 
 export async function renderCard(project: Project, sideName: SideName, options: RenderCardOptions = {}) {
@@ -605,25 +679,32 @@ export async function renderCard(project: Project, sideName: SideName, options: 
   const canvas = makeCanvas((width + bleed * 2) * scale, (height + bleed * 2) * scale);
   const context = canvas.getContext('2d')!;
   context.scale(scale, scale);
-  const ground = side.nodes.find(n => n.type === 'rect' && n.visible && n.opacity === 1 &&
-    n.rotation === 0 && n.x <= 0 && n.y <= 0 && n.x+n.width >= width && n.y+n.height >= height &&
-    hasFill(n) && fillType(n) === 'solid' && /^(#[a-f\d]{3}|#[a-f\d]{6})$/i.test(n.fill) &&
-    (n.fillOpacity ?? 1) === 1 && !n.clipRegionId);
-  context.fillStyle = options.plate ? '#ffffff' : ground?.fill || '#ffffff';
-  if (!options.transparentGround) context.fillRect(0, 0, width + bleed * 2, height + bleed * 2);
+  if (!options.transparentGround) {
+    if (options.plate || options.material === false) {
+      const ground = !options.plate && side.nodes.find(n => n.type === 'rect' && n.visible && n.opacity === 1 &&
+        n.rotation === 0 && n.x <= 0 && n.y <= 0 && n.x+n.width >= width && n.y+n.height >= height &&
+        hasFill(n) && fillType(n) === 'solid' && /^(#[a-f\d]{3}|#[a-f\d]{6})$/i.test(n.fill) &&
+        (n.fillOpacity ?? 1) === 1 && !n.clipRegionId);
+      context.fillStyle = (ground && ground.fill) || '#ffffff';
+      context.fillRect(0, 0, width + bleed * 2, height + bleed * 2);
+    } else {
+      await drawStockGround(context, project, side, scale, options.bleed);
+    }
+  }
   context.translate(bleed, bleed);
   if (options.plate) {
+    context.resetTransform();
     for (const effect of side.effects) {
-      if (!processLayerEnabled(effect) || !effectBelongsToPlate(effect, options.plate) ||
+      if (!(options.productionOnly ? effectInProduction(effect) : processLayerEnabled(effect)) || !effectBelongsToPlate(effect, options.plate) ||
           (options.layerId && effect.id !== options.layerId)) continue;
-      const area = await renderEffectMask(project, side, effect, scale);
+      const area = await renderEffectMask(project, side, effect, scale, options.bleed);
       const mask = makeCanvas(area.width, area.height);
       const maskContext = mask.getContext('2d')!;
       maskContext.drawImage(area, 0, 0);
       maskContext.globalCompositeOperation = 'source-in';
       maskContext.fillStyle = '#000000';
       maskContext.fillRect(0, 0, mask.width, mask.height);
-      context.drawImage(mask, 0, 0, width, height);
+      context.drawImage(mask, 0, 0);
     }
     return canvas;
   }
@@ -631,26 +712,23 @@ export async function renderCard(project: Project, sideName: SideName, options: 
   context.beginPath();
   context.rect(-bleed, -bleed, width + bleed * 2, height + bleed * 2);
   context.clip();
-  const cached = new Map<string, HTMLCanvasElement>();
-  for (const node of side.nodes) {
-    if (!node.visible || node.type === 'empty') continue;
-    const clip = node.clipRegionId && side.regions.find(region => region.id === node.clipRegionId);
-    if (!clip) { await drawNode(context, node); continue; }
-    const area = await renderRegionMask(project, side, clip, scale, new Set(), cached);
-    const clipped = makeCanvas(area.width, area.height);
-    const target = clipped.getContext('2d')!;
-    target.scale(scale, scale);
-    await drawNode(target, { ...node, blend: undefined });
-    target.resetTransform();
-    target.globalCompositeOperation = 'destination-in';
-    target.drawImage(area, 0, 0);
-    context.globalCompositeOperation = (node.blend || 'source-over') as GlobalCompositeOperation;
-    context.drawImage(clipped, 0, 0, width, height);
-    context.globalCompositeOperation = 'source-over';
+  const stock = options.effects !== false && options.material !== false
+    ? await renderStockReflection(project, side, scale, options.bleed) : undefined;
+  if (stock) {
+    context.save();
+    context.resetTransform();
+    context.globalAlpha = stock.opacity;
+    context.globalCompositeOperation = stock.blend;
+    context.drawImage(stock.canvas, 0, 0);
+    context.restore();
   }
+  await drawCardArtwork(context, project, side, scale, side.nodes, options.bleed);
   if (options.effects !== false) {
-    const effects = await renderEffects(project, side, scale, options.light || 0, options.material !== false, options.localFlash !== false);
-    context.drawImage(effects, 0, 0, width, height);
+    const effects = await renderEffects(project, side, scale, options.light || 0, options.localFlash !== false, options.bleed);
+    context.save();
+    context.resetTransform();
+    context.drawImage(effects, 0, 0);
+    context.restore();
   }
   context.restore();
   return canvas;
