@@ -39,8 +39,8 @@ export default function PrintProfileEditor({ project, profile, onChange, onLoadT
     if (profile) onChange({ ...profile, [key]: value }, `print-profile:${key}`);
   };
   const numberField = (key: 'widthMm' | 'heightMm' | 'bleedMm' | 'safeMm' | 'dpi' | 'minImagePpi' |
-      'minPlateWidthMm' | 'plateTrimMarginMm' | 'whiteFoilGapMm', label: string, min: number, max: number, step = .1) =>
-    <NumericProfileField label={label} min={min} max={max} step={step} value={profile![key]} onChange={value => update(key, value)}/>;
+      'minPlateWidthMm' | 'minKnockoutMm' | 'plateTrimMarginMm' | 'whiteFoilGapMm', label: string, min: number, max: number, step = .1) =>
+    <NumericProfileField label={label} min={min} max={max} step={step} value={profile![key] ?? 0} onChange={value => update(key, value)}/>;
   return <section className="production-section print-profile-settings">
     <h3>印厂配置</h3>
     <label className="field">交稿方式<select value={pending ?? selected} onChange={chooseRoute}>
@@ -87,7 +87,9 @@ export default function PrintProfileEditor({ project, profile, onChange, onLoadT
           {numberField('dpi', '输出分辨率（PPI）', 150, 1200, 1)}
           {numberField('minImagePpi', '原图最低有效 PPI', 0, 1200, 1)}
           <label className="field">交稿卡面<select value={profile.faces} onChange={event => update('faces', event.target.value as PrintJobProfile['faces'])}>
-            <option value="both" disabled={project.singleSided}>正反两面</option><option value="front">仅正面</option><option value="either" disabled={project.singleSided}>任一面或两面</option>
+            <option value="both" disabled={project.singleSided}>正反两面</option>
+            <option value="front" disabled={project.singleSided && project.looseFace === 'back'}>仅正面</option>
+            <option value="either">任一面或两面</option>
           </select></label>
           {profile.route === 'raster' && <label className="field">主稿格式<select value={profile.rasterFormat}
             onChange={event => update('rasterFormat', event.target.value as PrintJobProfile['rasterFormat'])}>
@@ -113,6 +115,7 @@ export default function PrintProfileEditor({ project, profile, onChange, onLoadT
           <label className="field">箔版专色名<input maxLength={64} value={profile.spotNames.foil ?? ''}
             onChange={event => update('spotNames', { ...profile.spotNames, foil: event.target.value })} placeholder="沿用技术配置"/></label>
           {numberField('minPlateWidthMm', '工艺最小线宽（mm）', 0, 10, .01)}
+          {numberField('minKnockoutMm', '版内最小反白间隙（mm）', 0, 10, .01)}
           {numberField('plateTrimMarginMm', '工艺版离裁切边（mm）', 0, 20, .01)}
           {numberField('whiteFoilGapMm', '白墨与箔版间距（mm）', 0, 10, .01)}
         </div>

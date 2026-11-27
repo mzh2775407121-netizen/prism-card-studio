@@ -1,6 +1,7 @@
 import { buildLayerTree, findLayerGroup, type LayerTreeItem } from './layerGroups';
-import { cardTextLayout } from './render';
-import type { AutoLayout, CardNode, CardSide, LayerGroup, LayoutDirection, LayoutSizeMode } from './model';
+import { cardTextLayout, naturalCardTextWidth } from './render';
+import { artworkFontReady } from './artworkFonts';
+import { clearLayoutItemOffset, clearLayoutItemPlacement, MAX_LAYOUT_ITEM_OFFSET, type AutoLayout, type CardNode, type CardSide, type LayerGroup, type LayoutDirection, type LayoutItem, type LayoutSizeMode } from './model';
 
 type Point = { x: number; y: number };
 type Axis = 'width' | 'height';
@@ -9,6 +10,7 @@ type Entry = { item: LayerTreeItem; bounds: Bounds; children: Entry[]; visible: 
 
 const MAX_SIZE = 100_000;
 const size = (value: number) => Math.max(.001, Math.min(value, MAX_SIZE));
+const zeroOffset: Point = { x: 0, y: 0 };
 const epsilon = .000001;
 const same = (a: number, b: number) => Math.abs(a - b) < epsilon;
 const sameBounds = (a: Bounds, b: Bounds) =>
@@ -46,17 +48,45 @@ function entryLayout(entry: Entry) {
   return entry.item.kind === 'group' ? entry.item.group.autoLayout : undefined;
 }
 
+function itemSizing(entry: Entry) {
+  const item = entry.item;
+  return item.kind === 'artwork' ? item.node.layoutItem : item.kind === 'group' ? item.group.layoutItem : undefined;
+}
+
+function flowChildren(entry: Entry) {
+  return entry.children.filter(child => child.visible && !itemSizing(child)?.absolute);
+}
+
+function itemOffset(item: LayoutItem | undefined): Point {
+  const offset = item?.offset;
+  return offset && Number.isFinite(offset.x) && Number.isFinite(offset.y) &&
+    Math.abs(offset.x) <= MAX_LAYOUT_ITEM_OFFSET && Math.abs(offset.y) <= MAX_LAYOUT_ITEM_OFFSET ? offset : zeroOffset;
+}
+
+/** Shift an item's visual position while preserving its slot in the automatic layout. */
+export function offsetLayoutItem(item: LayoutItem | undefined, delta: Point): LayoutItem | undefined {
+  if (!Number.isFinite(delta.x) || !Number.isFinite(delta.y) || (!delta.x && !delta.y)) return item;
+  const offset = itemOffset(item);
+  const clamp = (value: number) => Math.max(-MAX_LAYOUT_ITEM_OFFSET, Math.min(MAX_LAYOUT_ITEM_OFFSET, value));
+  const x = clamp(offset.x + delta.x), y = clamp(offset.y + delta.y);
+  if (offset.x === x && offset.y === y) return item;
+  return x || y ? { ...item, offset: { x, y } } : clearLayoutItemOffset(item);
+}
+
 function childMode(entry: Entry, axis: Axis, managed: boolean): LayoutSizeMode | undefined {
   if (!managed) return undefined;
-  const item = entry.item;
-  const sizing = item.kind === 'artwork' ? item.node.layoutItem : item.kind === 'group' ? item.group.layoutItem : undefined;
+  const { item } = entry;
+  const sizing = itemSizing(entry);
   const mode = axis === 'width' ? sizing?.widthMode : sizing?.heightMode;
   if (!mode && axis === 'height' && item.kind === 'artwork' && item.node.type === 'text') return 'hug';
   return mode;
 }
 
 function groupMode(entry: Entry, layout: AutoLayout, axis: Axis, managed: boolean) {
-  const mode = childMode(entry, axis, managed);
+  const absolute = itemSizing(entry)?.absolute === true;
+  const mode = childMode(entry, axis, managed || absolute);
+  // A detached fill frame keeps the size it had at the point it left the flow.
+  if (mode === 'fill' && absolute) return 'fixed';
   if (mode === 'fixed' || mode === 'hug') return mode;
   return axis === 'width' ? layout.widthMode : layout.heightMode;
 }
@@ -83,14 +113,24 @@ function fit(layout: AutoLayout, axis: Axis, childSizes: number[]) {
 function allocate(layout: AutoLayout, axis: Axis, total: number, fixed: boolean, children: Entry[], natural: number[]) {
   const fills = children.map(child => fixed && childMode(child,axis,true) === 'fill' &&
     (child.item.kind === 'artwork' || Boolean(entryLayout(child))));
-  const count = fills.filter(Boolean).length;
-  if (!count) return {sizes:natural,fills};
+  const minimumKey = axis === 'width' ? 'minWidth' : 'minHeight';
+  const remaining = children.flatMap((child,index) => fills[index]
+    ? [{ index, min: itemSizing(child)?.[minimumKey] ?? Math.max(1,child.bounds[axis]) }] : []);
+  if (!remaining.length) return {sizes:natural,fills};
   let available = total - padding(layout,axis);
-  if (along(layout,axis)) {
-    natural.forEach((value,index) => { if (!fills[index]) available -= value; });
-    available = (available - gaps(layout,children.length)) / count;
+  const sizes = [...natural];
+  if (!along(layout,axis)) {
+    for (const {index,min} of remaining) sizes[index] = size(Math.max(min,available));
+    return {sizes,fills};
   }
-  return {sizes:natural.map((value,index) => fills[index] ? size(available) : value),fills};
+  natural.forEach((value,index) => { if (!fills[index]) available -= value; });
+  available -= gaps(layout,children.length);
+  remaining.sort((a,b) => b.min - a.min);
+  remaining.forEach(({index,min},offset) => {
+    sizes[index] = size(Math.max(min, available / (remaining.length - offset)));
+    available -= sizes[index];
+  });
+  return {sizes,fills};
 }
 
 let measurementContext: CanvasRenderingContext2D | null | undefined;
@@ -104,23 +144,16 @@ function contextForText() {
 
 function textWidth(node: CardNode) {
   const context = contextForText();
-  if (!context) return node.width;
-  const {font,inset} = cardTextLayout(context,{ ...node, text: '', width: MAX_SIZE });
-  context.save();
-  try {
-    context.font = font;
-    context.letterSpacing = `${node.letterSpacing ?? 0}px`;
-    const width = Math.max(0,...(node.text || '').split('\n').map(line => context.measureText(line).width));
-    // Round upward so measuring and wrapping cannot disagree at a glyph boundary.
-    return size(Math.ceil((width + inset * 2 + epsilon) * 1000) / 1000);
-  } finally {
-    context.restore();
-  }
+  if (!context || !artworkFontReady(node)) return node.width;
+  const {inset} = cardTextLayout(context,{ ...node, text: '', textStyles: undefined, width: MAX_SIZE });
+  const width = naturalCardTextWidth(context, node);
+  // Round upward so measuring and wrapping cannot disagree at a glyph boundary.
+  return size(Math.ceil((width + inset * 2 + epsilon) * 1000) / 1000);
 }
 
 function textHeight(node: CardNode, width: number) {
   const context = contextForText();
-  return context ? size(cardTextLayout(context,{...node,width}).contentHeight) : node.height;
+  return context && artworkFontReady(node) ? size(cardTextLayout(context,{...node,width}).contentHeight) : node.height;
 }
 
 function measureFree(entry: Entry, axis: Axis, measure: (child: Entry) => number) {
@@ -136,6 +169,7 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
   const roots = entryTree(side);
   const nodes = new Map<string, CardNode>();
   const frames = new Map<string, AutoLayout>();
+  const sizingChanges = new Map<string, LayoutItem>();
   const widthCache = new Map<Entry,number>();
   const heightCache = new Map<Entry,{width:number;fixedWidth:boolean;height:number}>();
 
@@ -145,7 +179,7 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
     const layout = entryLayout(entry);
     let width = entry.bounds.width;
     if (layout && entry.visible && groupMode(entry,layout,'width',managed) === 'hug') {
-      width = fit(layout,'width',entry.children.filter(child => child.visible).map(child => preferredWidth(child,true)));
+      width = fit(layout,'width',flowChildren(entry).map(child => preferredWidth(child,true)));
     } else if (!layout && entry.item.kind === 'group') {
       width = measureFree(entry,'width',child => preferredWidth(child,false));
     } else if (entry.item.kind === 'artwork' && entry.item.node.type === 'text' && childMode(entry,'width',managed) === 'hug') {
@@ -166,7 +200,7 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
     const layout = entryLayout(entry);
     let height = entry.bounds.height;
     if (layout && entry.visible && groupMode(entry,layout,'height',managed) === 'hug') {
-      const children = entry.children.filter(child => child.visible);
+      const children = flowChildren(entry);
       const horizontal = widths(entry,layout,children,width,managed,fixedWidth);
       height = fit(layout,'height',children.map((child,index) =>
         preferredHeight(child,horizontal.sizes[index],true,horizontal.fills[index])));
@@ -181,6 +215,12 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
 
   function place(entry: Entry, rectangle: Bounds, managed: boolean, fixedWidth = false, fixedHeight = false) {
     const { item, bounds } = entry;
+    const sizing = itemSizing(entry);
+    if (managed && sizing) {
+      const minWidth = sizing.minWidth ?? (sizing.widthMode==='fill' ? Math.max(1,bounds.width) : undefined);
+      const minHeight = sizing.minHeight ?? (sizing.heightMode==='fill' ? Math.max(1,bounds.height) : undefined);
+      if (minWidth!==sizing.minWidth || minHeight!==sizing.minHeight) sizingChanges.set(item.id,{...sizing,minWidth,minHeight});
+    }
     const originalOrigin = previousOrigin?.id === item.id ? previousOrigin : bounds;
     const {x,y,width,height} = rectangle;
     if (item.kind === 'artwork') {
@@ -199,7 +239,7 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
       }
       return;
     }
-    const children = entry.children.filter(child => child.visible);
+    const children = flowChildren(entry);
     const horizontalSizing = widths(entry,layout,children,width,managed,fixedWidth);
     const verticalSizing = allocate(layout,'height',height,fixedHeight || groupMode(entry,layout,'height',managed) === 'fixed',children,
       children.map((child,index) => preferredHeight(child,horizontalSizing.sizes[index],true,horizontalSizing.fills[index])));
@@ -212,14 +252,18 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
         ? height - padding(layout,'height') - childHeight
         : width - padding(layout,'width') - childWidth;
       const cross = Math.max(0,leftover) * align;
-      place(child,{ x:x + layout.padding.left + (horizontal ? shift : cross),
-        y:y + layout.padding.top + (horizontal ? cross : shift),width:childWidth,height:childHeight },true,
+      const offset = itemOffset(itemSizing(child));
+      place(child,{ x:x + layout.padding.left + (horizontal ? shift : cross) + offset.x,
+        y:y + layout.padding.top + (horizontal ? cross : shift) + offset.y,width:childWidth,height:childHeight },true,
       horizontalSizing.fills[index],verticalSizing.fills[index]);
       shift += (horizontal ? childWidth : childHeight) + layout.gap;
     });
-    // Hidden children do not consume space, but they still follow a whole-frame translation.
-    for (const child of entry.children) if (!child.visible) {
-      place(child,{...child.bounds,x:child.bounds.x + x - originalOrigin.x,y:child.bounds.y + y - originalOrigin.y},false);
+    // Children outside the flow follow a whole-frame translation while keeping their own layout.
+    for (const child of entry.children) {
+      if (child.visible && !itemSizing(child)?.absolute) continue;
+      const width = child.visible ? preferredWidth(child,false) : child.bounds.width;
+      const height = child.visible ? preferredHeight(child,width,false) : child.bounds.height;
+      place(child,{x:child.bounds.x + x - originalOrigin.x,y:child.bounds.y + y - originalOrigin.y,width,height},false);
     }
   }
 
@@ -227,12 +271,16 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
     const width = preferredWidth(root,false);
     place(root,{...root.bounds,width,height:preferredHeight(root,width,false)},false);
   }
-  if (!nodes.size && !frames.size) return side;
+  if (!nodes.size && !frames.size && !sizingChanges.size) return side;
   const before = new Map(side.nodes.map(node => [node.id,node]));
   return {
     ...side,
-    nodes: side.nodes.map(node => nodes.get(node.id) ?? node),
-    groups: side.groups.map(group => frames.has(group.id) ? { ...group, autoLayout: frames.get(group.id) } : group),
+    nodes: side.nodes.map(node => {
+      const next = nodes.get(node.id) ?? node;
+      return sizingChanges.has(node.id) ? {...next,layoutItem:sizingChanges.get(node.id)} : next;
+    }),
+    groups: side.groups.map(group => frames.has(group.id) || sizingChanges.has(group.id)
+      ? {...group,autoLayout:frames.get(group.id)??group.autoLayout,layoutItem:sizingChanges.get(group.id)??group.layoutItem} : group),
     regions: side.regions.map(region => {
       const source = region.nodeId && nodes.has(region.nodeId) ? before.get(region.nodeId) : undefined;
       // Legacy fixed contours may reference a node without retaining their original shape.
@@ -240,6 +288,16 @@ export function applyAutoLayout(side: CardSide, previousOrigin?: Point & { id: s
         ? {...region,snapshot:source} : region;
     }),
   };
+}
+
+export function autoLayoutOverflow(side: CardSide, groupId: string) {
+  const group = findEntry(entryTree(side),groupId);
+  const layout = group && entryLayout(group);
+  if (!group || !layout) return undefined;
+  const children = flowChildren(group);
+  const width = Math.max(0,...children.map(({bounds}) => bounds.x + bounds.width - layout.x + layout.padding.right - layout.width));
+  const height = Math.max(0,...children.map(({bounds}) => bounds.y + bounds.height - layout.y + layout.padding.bottom - layout.height));
+  return width > epsilon || height > epsilon ? {width,height} : undefined;
 }
 
 /** Read the initial frame from the selected artwork's existing coordinates. */
@@ -258,6 +316,17 @@ export function setAutoLayout(side: CardSide, groupId: string, layout: AutoLayou
   if (!groups || !group || (!layout && !group.autoLayout)) return side;
   let nodes = side.nodes;
   let previousOrigin = group.autoLayout;
+  function updateChildLayout(item: LayoutItem | undefined) {
+    if (!layout) return clearLayoutItemPlacement(item);
+    if (!group?.autoLayout || !item || item.absolute) return item;
+    const widthMode = layout.widthMode==='hug'&&group.autoLayout.widthMode==='fixed'&&item.widthMode==='fill'?'fixed':item.widthMode;
+    const heightMode = layout.heightMode==='hug'&&group.autoLayout.heightMode==='fixed'&&item.heightMode==='fill'?'fixed':item.heightMode;
+    return widthMode===item.widthMode&&heightMode===item.heightMode?item:{...item,widthMode,heightMode};
+  }
+  function updateChild<T extends CardNode | LayerGroup>(child: T): T {
+    const layoutItem = updateChildLayout(child.layoutItem);
+    return layoutItem === child.layoutItem ? child : { ...child, layoutItem };
+  }
   if (layout && !group.autoLayout) {
     const entry = findEntry(entryTree(side), groupId);
     if (!entry?.children.length) return side;
@@ -277,14 +346,17 @@ export function setAutoLayout(side: CardSide, groupId: string, layout: AutoLayou
     let position = 0;
     nodes = side.nodes.map(node => items.has(node.id) ? ordered[position++] : node);
   }
-  return applyAutoLayout({ ...side, nodes, groups: groups.map(item => item.id === groupId
-    ? { ...item, autoLayout: layout } : item) }, layout && previousOrigin
+  return applyAutoLayout({ ...side, nodes: nodes.map(node=>node.groupId===groupId?updateChild(node):node), groups: groups.map(item => item.id === groupId
+    ? { ...item, autoLayout: layout } : item.parentId===groupId?updateChild(item):item) }, layout && previousOrigin
     ? {id:groupId,x:previousOrigin.x,y:previousOrigin.y} : undefined);
 }
 
 export function layoutParent(side: CardSide, id: string): LayerGroup | undefined {
   if (!side.groups?.length) return undefined;
-  const owner = side.nodes.find(node => node.id === id)?.groupId ?? side.groups.find(group => group.id === id)?.parentId;
+  const node = side.nodes.find(node => node.id === id);
+  const group = node ? undefined : side.groups.find(group => group.id === id);
+  if ((node ?? group)?.layoutItem?.absolute) return undefined;
+  const owner = node?.groupId ?? group?.parentId;
   const parent = owner && side.groups.find(group => group.id === owner);
   return parent && parent.autoLayout ? parent : undefined;
 }

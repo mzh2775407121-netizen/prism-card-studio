@@ -1,0 +1,190 @@
+.workbench-account-area {
+  position: relative;
+  flex: none;
+}
+
+.workbench-avatar-trigger[aria-expanded="true"] .workbench-avatar {
+  outline: 1px solid var(--prism-focus);
+  outline-offset: 1px;
+}
+
+.account-menu {
+  position: absolute;
+  z-index: 10;
+  inset: calc(100% + 8px) 0 auto auto;
+  width: min(312px, calc(100vw - 32px));
+  max-height: calc(100dvh - 80px);
+  overflow: auto;
+  padding: 11px 11px 5px;
+  border: 1px solid #3a3a3a;
+  border-radius: var(--radius-panel);
+  color: #f2f2f2;
+  background: #242424;
+  box-shadow: 0 14px 38px rgb(0 0 0 / 48%);
+  animation: account-menu-enter 155ms ease-out both;
+  transform-origin: top right;
+}
+
+.account-menu-identity {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding-inline: 4px;
+}
+
+.account-menu-identity > img {
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.account-menu-name {
+  min-width: 0;
+}
+
+.account-menu-name strong {
+  display: block;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-menu-name small {
+  display: block;
+  color: #a6a6a6;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.account-menu-icon {
+  display: block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.account-menu-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 3px;
+  width: 84px;
+  padding: 0 5px 0 10px;
+  border-radius: var(--radius-control);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.account-menu-library {
+  min-height: 30px;
+  border: 1px solid #424242;
+  background: #2d2d2d;
+}
+
+.account-menu-library:hover {
+  background: #383838;
+}
+
+.account-menu-credits {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 67px;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border: 1px solid #30465a;
+  border-radius: 12px;
+  background-image: linear-gradient(-75.87deg, rgb(27 41 53 / 62%) .45%, rgb(19 64 103 / 62%) 100%);
+}
+
+.account-menu-credits span {
+  display: block;
+  color: #b2c3d2;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.account-menu-credits strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f2f7fc;
+  font-size: 23px;
+  font-weight: 600;
+  line-height: 30px;
+}
+
+.account-menu-credit-link {
+  min-height: 28px;
+  color: white;
+  background: #10202f;
+}
+
+.account-menu-credit-link:hover {
+  background: #19344a;
+}
+
+.account-menu-pages {
+  margin-top: 9px;
+}
+
+.account-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: var(--radius-control);
+  color: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: start;
+  text-decoration: none;
+}
+
+.account-menu-row:not(:disabled):is(:hover, :focus-visible) {
+  background: #303030;
+}
+
+.account-menu-row-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.account-menu-row-value {
+  color: #a6a6a6;
+  font-size: 12px;
+}
+
+.account-menu-session {
+  margin-top: 6px;
+  padding-top: 7px;
+  border-top: 1px solid #3a3a3a;
+}
+
+.account-menu :focus-visible {
+  outline: 1px solid var(--prism-focus);
+  outline-offset: -2px;
+}
+
+@keyframes account-menu-enter {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 700px) {
+  .account-menu { max-height: calc(100dvh - 124px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-menu { animation: none; }
+}

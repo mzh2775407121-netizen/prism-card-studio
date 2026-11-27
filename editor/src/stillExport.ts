@@ -1,6 +1,6 @@
 import { prepareInspectorFace, type InspectorFace, type InspectorFlash } from './albumInspectorAssets';
 import { getCardCornerRadiusMm, type Project, type SideName } from './model';
-import { makeCanvas } from './render';
+import { makeCanvas, rasterContext } from './render';
 import { paintStockOptics, REST_STOCK_LIGHT, stockBlendMode, type StockLight } from './stockOptics';
 
 export const INSPECTOR_BACKGROUND = '#e9e9e9';
@@ -20,6 +20,7 @@ export type StillExportOptions = {
   view?: StillView;
   background?: string;
   effects?: boolean;
+  resampling?: 'high' | 'medium';
 };
 type Context = CanvasRenderingContext2D;
 type ColorStop = [number, string];
@@ -134,14 +135,15 @@ function paintFlash(layer: Context, plane: Context, finish: InspectorFlash, ligh
 
 const workLayers = new WeakMap<HTMLCanvasElement, { finish: Context; plane: Context }>();
 
-export function paintInspectorFace(target: HTMLCanvasElement, face: InspectorFace, light: InspectorLight) {
+export function paintInspectorFace(target: HTMLCanvasElement, face: InspectorFace, light: InspectorLight,
+  resampling?: ImageSmoothingQuality) {
   const { width, height } = face.base;
   if (target.width !== width || target.height !== height) {
     target.width = width;
     target.height = height;
     workLayers.delete(target);
   }
-  const context = target.getContext('2d')!;
+  const context = rasterContext(target, resampling);
   context.clearRect(0, 0, width, height);
   context.drawImage(face.base, 0, 0);
   if (!face.optics && !face.flashes.length && (!face.glare || !light.opacity)) {
@@ -150,7 +152,7 @@ export function paintInspectorFace(target: HTMLCanvasElement, face: InspectorFac
   }
   let work = workLayers.get(target);
   if (!work) {
-    work = { finish: makeCanvas(width, height).getContext('2d')!, plane: makeCanvas(width, height).getContext('2d')! };
+    work = { finish: rasterContext(makeCanvas(width, height), resampling), plane: rasterContext(makeCanvas(width, height), resampling) };
     workLayers.set(target, work);
   }
   if (face.optics) {
@@ -243,16 +245,34 @@ function drawPerspective(context: Context, source: HTMLCanvasElement, view?: Sti
   }
 }
 
-export async function renderStill(project: Project, side: SideName, { width, height, view, background, effects = true }: StillExportOptions) {
+async function renderCardSurface(project: Project, side: SideName, scale: number, light: InspectorLight,
+  effects: boolean, resampling?: ImageSmoothingQuality) {
+  const face = await prepareInspectorFace(project, side, scale, effects, resampling);
+  const surface = makeCanvas(face.base.width, face.base.height);
+  paintInspectorFace(surface, face, light, resampling);
+  workLayers.delete(surface);
+  return surface;
+}
+
+export async function renderFlatCardTexture(project: Project, side: SideName, scale: number, resampling?: ImageSmoothingQuality) {
+  const surface = await renderCardSurface(project, side, scale, REST_STOCK_LIGHT, true, resampling);
+  const context = surface.getContext('2d')!;
+  context.globalCompositeOperation = 'destination-over';
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, surface.width, surface.height);
+  context.globalCompositeOperation = 'source-over';
+  return surface;
+}
+
+export async function renderStill(project: Project, side: SideName,
+  { width, height, view, background, effects = true, resampling }: StillExportOptions) {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 ||
       width > 8192 || height > 8192 || width * height > 32_000_000) {
     throw new Error('图片尺寸超出导出范围，请降低像素尺寸。');
   }
   const captured = view?.side === side ? view : undefined;
   const scale = Math.min(width / (project.widthMm * 10), height / (project.heightMm * 10));
-  const face = await prepareInspectorFace(project, side, scale, effects);
-  const source = makeCanvas(face.base.width, face.base.height);
-  paintInspectorFace(source, face, captured?.light ?? REST_STOCK_LIGHT);
+  const source = await renderCardSurface(project, side, scale, captured?.light ?? REST_STOCK_LIGHT, effects, resampling);
   const sourceContext = source.getContext('2d')!;
   sourceContext.globalCompositeOperation = 'destination-in';
   sourceContext.beginPath();
@@ -260,7 +280,7 @@ export async function renderStill(project: Project, side: SideName, { width, hei
   sourceContext.roundRect(0, 0, source.width, source.height, radius);
   sourceContext.fill();
   const output = makeCanvas(width, height);
-  const context = output.getContext('2d')!;
+  const context = rasterContext(output, resampling);
   const ground = background ?? captured?.background ?? '#ffffff';
   if (ground !== 'transparent') {
     context.fillStyle = ground;

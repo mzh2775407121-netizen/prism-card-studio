@@ -1,6 +1,9 @@
 """Revision-checked storage for the local Prism project library."""
 
 import json
+import base64
+import binascii
+import hashlib
 import re
 import sqlite3
 import time
@@ -10,8 +13,9 @@ PROJECT_ID = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
 MUTATION_ID = re.compile(r'[a-fA-F0-9-]{36}\Z')
 METADATA = 'id, name, width_mm, height_mm, updated_at, archived_at, revision, card_count'
 MAX_PROJECT_NOTE_LENGTH = 500
-PROJECT_FIELDS = ('id', 'name', 'version', 'updatedAt', 'note')
+PROJECT_FIELDS = ('id', 'name', 'version', 'updatedAt', 'note', 'stylePresets', 'canvasFacePositions', 'projectCover')
 CARD_FIELDS = ('cardId', 'cardName', 'additionalCards')
+MAX_CANVAS_POSITION = 1_000_000_000
 STOCK_REFLECTIONS = ('none', 'mirror', 'matte-silver', 'rainbow', 'dots', 'cracked-ice', 'pillar', 'radial')
 
 
@@ -62,6 +66,8 @@ def validate_card(card):
             raise ProjectError('卡片尺寸或出血无效')
     if not isinstance(card.get('material'), str):
         raise ProjectError('卡牌材质无效')
+    if 'looseFace' in card and (card['looseFace'] != 'back' or card.get('singleSided') is not True):
+        raise ProjectError('独立卡面的方向无效')
     if 'stockReflection' in card and card['stockReflection'] not in STOCK_REFLECTIONS:
         raise ProjectError('底材反光类型无效')
     if 'stockSpec' in card:
@@ -82,6 +88,37 @@ def validate_card(card):
             raise ProjectError('项目缺少完整的正反面数据')
         if 'stockFinish' in face:
             validate_finish(face['stockFinish'])
+        if 'canvasLocked' in face and type(face['canvasLocked']) is not bool:
+            raise ProjectError('卡面锁定状态无效')
+
+
+def validate_style_presets(presets):
+    if not isinstance(presets, list) or len(presets) > 32:
+        raise ProjectError('项目样式预设数量无效')
+    ids, names = set(), set()
+    for preset in presets:
+        if not isinstance(preset, dict):
+            raise ProjectError('项目样式预设无效')
+        identity, name, kind = preset.get('id'), preset.get('name'), preset.get('kind')
+        if not isinstance(identity, str) or not 1 <= len(identity) <= 128 or identity in ids or \
+                not isinstance(name, str) or len(name) > 40 or not name.strip() or kind not in ('gradient', 'effects'):
+            raise ProjectError('项目样式预设无效')
+        key = (kind, name.strip().lower())
+        if key in names:
+            raise ProjectError('项目样式预设名称重复')
+        ids.add(identity)
+        names.add(key)
+        if kind == 'gradient':
+            gradient = preset.get('gradient')
+            stops = gradient.get('stops') if isinstance(gradient, dict) else None
+            if not isinstance(stops, list) or not 2 <= len(stops) <= 24 or not all(
+                    isinstance(stop, list) and len(stop) == 2 and valid_number(stop[0], 0, 1) and isinstance(stop[1], str)
+                    for stop in stops):
+                raise ProjectError('形状渐变无效')
+        else:
+            effects = preset.get('effects')
+            if not isinstance(effects, list) or len(effects) > 12 or not all(isinstance(effect, dict) for effect in effects):
+                raise ProjectError('图层效果数据无效')
 
 
 def canonical_document(doc, project_id):
@@ -94,6 +131,8 @@ def canonical_document(doc, project_id):
         note = doc['note']
         if not isinstance(note, str) or len(note) > MAX_PROJECT_NOTE_LENGTH:
             raise ProjectError('项目备注无效')
+    if 'stylePresets' in doc:
+        validate_style_presets(doc['stylePresets'])
     if not valid_revision(doc.get('version'), 1):
         raise ProjectError('项目版本无效')
     if 'cards' in doc:
@@ -113,6 +152,27 @@ def canonical_document(doc, project_id):
         if card['id'] in ids:
             raise ProjectError('卡牌标识重复')
         ids.add(card['id'])
+    if 'projectCover' in doc:
+        cover = doc['projectCover']
+        if not isinstance(cover, dict) or cover.get('face') not in ('front', 'back') or not any(
+            card['id'] == cover.get('cardId') and (cover['face'] == 'front' or not card.get('singleSided'))
+            for card in cards
+        ):
+            raise ProjectError('项目封面对应的卡面无效')
+    if 'canvasFacePositions' in doc:
+        positions = doc['canvasFacePositions']
+        face_keys = {
+            f"{card['id']}:{slot}"
+            for card in cards
+            for slot in (('front',) if card.get('singleSided') else ('front', 'back'))
+        }
+        if not isinstance(positions, dict) or any(
+            key not in face_keys or not isinstance(point, dict) or not all(
+                valid_number(point.get(axis), -MAX_CANVAS_POSITION, MAX_CANVAS_POSITION) for axis in ('x', 'y')
+            )
+            for key, point in positions.items()
+        ):
+            raise ProjectError('卡面画布坐标无效')
     return {
         **{key: doc[key] for key in PROJECT_FIELDS if key in doc},
         'cards': cards,
@@ -166,6 +226,54 @@ class ProjectStore:
             )''')
             if not any(column['name'] == 'card_count' for column in db.execute('PRAGMA table_info(projects)')):
                 db.execute('ALTER TABLE projects ADD COLUMN card_count INTEGER NOT NULL DEFAULT 1')
+            db.execute('''CREATE TABLE IF NOT EXISTS deliveries (
+                project_id TEXT NOT NULL, id TEXT NOT NULL, metadata TEXT NOT NULL, source BLOB NOT NULL,
+                PRIMARY KEY(project_id,id))''')
+
+    def deliveries(self, project_id):
+        with self.connection() as db:
+            return [json.loads(row['metadata']) for row in db.execute(
+                'SELECT metadata FROM deliveries WHERE project_id=?', (project_id,))]
+
+    def delivery_source(self, project_id, delivery_id):
+        with self.connection() as db:
+            row = db.execute('SELECT source FROM deliveries WHERE project_id=? AND id=?',
+                             (project_id, delivery_id)).fetchone()
+            if row is None:
+                raise ProjectError('交付版本不存在', 404)
+            return row['source']
+
+    def save_delivery(self, project_id, payload):
+        entry = payload.get('entry')
+        if (not isinstance(entry, dict) or entry.get('projectId') != project_id
+                or not isinstance(entry.get('id'), str) or not MUTATION_ID.fullmatch(entry['id'])
+                or not valid_revision(entry.get('revision'), 1) or not valid_revision(entry.get('cardIndex'))
+                or not valid_text(entry.get('cardId'), 302) or not valid_text(entry.get('cardName'), 500)
+                or entry.get('mode') not in ('image', 'print') or not valid_revision(entry.get('time'), 1)
+                or not isinstance(entry.get('faces'), list) or not 1 <= len(entry['faces']) <= 2
+                or not all(face in ('front','back') for face in entry['faces'])
+                or any(not valid_text(entry.get(field), 1100) for field in ('profile', 'output','engine'))
+                or not valid_number(entry.get('dpi'), 1, 9600)
+                or any(not isinstance(entry.get(key),str) or not re.fullmatch('[0-9a-f]{64}',entry[key])
+                       for key in ('sourceHash','checksum'))):
+            raise ProjectError('交付记录无效')
+        try:
+            source = base64.b64decode(payload.get('source', ''), validate=True)
+        except (ValueError, TypeError, binascii.Error) as error:
+            raise ProjectError('交付源稿无效') from error
+        if not 0 < len(source) <= 100*1024*1024 or hashlib.sha256(source).hexdigest() != entry['sourceHash']:
+            raise ProjectError('交付源稿校验失败')
+        metadata = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM projects WHERE id=?',(project_id,)).fetchone():
+                raise ProjectError('项目不存在',404)
+            old = db.execute('SELECT metadata FROM deliveries WHERE project_id=? AND id=?',(project_id,entry['id'])).fetchone()
+            if old and old['metadata'] != metadata:
+                raise ProjectError('交付记录已有不同内容',409)
+            if not old:
+                db.execute('INSERT INTO deliveries VALUES (?,?,?,?)',(project_id,entry['id'],metadata,source))
+        return {'id': entry['id']}
 
     @contextmanager
     def connection(self):
@@ -182,6 +290,13 @@ class ProjectStore:
             return [project_payload(row) for row in db.execute(
                 f'SELECT {METADATA} FROM projects ORDER BY updated_at DESC, id'
             )]
+
+    def summary(self, project_id):
+        with self.connection() as db:
+            row = db.execute(f'SELECT {METADATA} FROM projects WHERE id=?', (project_id,)).fetchone()
+            if row is None:
+                raise ProjectError('项目不存在', 404)
+            return project_payload(row)
 
     def get(self, project_id):
         with self.connection() as db:

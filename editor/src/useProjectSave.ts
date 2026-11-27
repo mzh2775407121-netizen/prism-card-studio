@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type { Project } from './model';
-import { ProjectRequestError, writeProject, type StoredProject } from './projects';
+import { accountWorkspace, currentWorkspace, ProjectRequestError, readProject, workspaceSignal, writeProject, type StoredProject } from './projects';
+import { discardAccountDraft, retainAccountDraft } from './accountDrafts';
 
 type SaveState = { status: 'saved' | 'saving' } | { status: 'error' | 'conflict'; message: string };
 type Attempt = { project: Project; mutation: string };
@@ -13,27 +14,34 @@ export function useProjectSave(initial: StoredProject, current: RefObject<Projec
   const running = useRef<Promise<boolean> | null>(null);
   const timer = useRef<number | undefined>(undefined);
   const conflict = useRef(false);
+  const owner=useRef(currentWorkspace());
+  const lifetime=useRef(workspaceSignal());
+  const ownsWorkspace=useCallback(()=>!lifetime.current.aborted&&currentWorkspace()===owner.current,[]);
 
   const saveNow = useCallback(() => {
     window.clearTimeout(timer.current);
-    if (conflict.current) return Promise.resolve(false);
+    if (!ownsWorkspace() || conflict.current) return Promise.resolve(false);
     if (running.current) return running.current;
-    if (saved.current === current.current) return Promise.resolve(true);
+    if (saved.current.version === current.current.version) return Promise.resolve(true);
     setState({ status: 'saving' });
 
     running.current = (async () => {
       try {
-        while (saved.current !== current.current) {
+        while (saved.current.version !== current.current.version) {
+          if (!ownsWorkspace()) return false;
           const pending = attempt.current ?? { project: current.current, mutation: crypto.randomUUID() };
           attempt.current = pending;
           const result = await writeProject(pending.project, revision.current, pending.mutation);
+          if (!ownsWorkspace()) return false;
           revision.current = result.revision;
           saved.current = pending.project;
           attempt.current = null;
         }
+        if(accountWorkspace(owner.current))void discardAccountDraft(owner.current,initial.id).catch(()=>{});
         setState({ status: 'saved' });
         return true;
       } catch (error) {
+        if (!ownsWorkspace()) return false;
         const status = error instanceof ProjectRequestError ? error.status : 0;
         conflict.current = status === 409;
         // The server may have committed a request whose response did not arrive.
@@ -49,27 +57,50 @@ export function useProjectSave(initial: StoredProject, current: RefObject<Projec
       }
     })();
     return running.current;
-  }, [current]);
+  }, [current,initial.id,ownsWorkspace]);
 
   const queueSave = useCallback(() => {
-    if (conflict.current) return;
+    if (!ownsWorkspace() || conflict.current) return;
     setState({ status: 'saving' });
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => { void saveNow(); }, 420);
-  }, [saveNow]);
+  }, [saveNow,ownsWorkspace]);
 
   useEffect(() => {
     function preventLoss(event: BeforeUnloadEvent) {
-      if (current.current === saved.current) return;
+      if (current.current.version === saved.current.version) return;
       event.preventDefault();
       event.returnValue = '';
     }
     window.addEventListener('beforeunload', preventLoss);
+    const keepAccountDraft=()=>{
+      window.clearTimeout(timer.current);
+      if(accountWorkspace(owner.current)&&current.current.version!==saved.current.version)
+        void retainAccountDraft(owner.current,current.current,revision.current).catch(()=>{});
+    };
+    window.addEventListener('prism-workspace-changed',keepAccountDraft);
     return () => {
       window.clearTimeout(timer.current);
       window.removeEventListener('beforeunload', preventLoss);
+      window.removeEventListener('prism-workspace-changed',keepAccountDraft);
     };
   }, [current]);
 
-  return { state, queueSave, saveNow };
+  const refresh = useCallback(async (draft: () => boolean, apply: (row: StoredProject) => void) => {
+    if (!ownsWorkspace() || conflict.current || running.current || attempt.current) return;
+    const seen = revision.current;
+    const row = await readProject(initial.id);
+    if (!ownsWorkspace() || running.current || attempt.current || seen !== revision.current || row.revision <= seen) return;
+    if (draft() || saved.current.version !== current.current.version || row.archivedAt !== null) {
+      window.clearTimeout(timer.current);
+      conflict.current = true;
+      setState({ status: 'conflict', message: row.archivedAt !== null ? '项目已归档，请另存当前草稿。' : '另一台设备已更新此项目，请保留当前草稿或查看最新版。' });
+      return;
+    }
+    revision.current = row.revision;
+    saved.current = row.project;
+    apply(row);
+  }, [initial.id,current,ownsWorkspace]);
+
+  return { state, queueSave, saveNow, refresh };
 }

@@ -16,6 +16,15 @@ export const SPOT_NAMES = {
   standard: { primer: 'Primer', white: 'White', spot: 'Spot_Ink', foil: 'Foil_Gold', clear: 'Spot_UV', emboss: 'Emboss', deboss: 'Deboss' },
   alternate: { primer: 'PRIMER', white: 'OPW', spot: 'SPOT_INK', foil: 'FOIL', clear: 'CLEAR', emboss: 'EMBOSS', deboss: 'DEBOSS' },
 };
+const FACTORY_STAGE_LABELS = { ...PLATE_LABELS, ...MANUAL_OPERATIONS, artwork: '彩稿', die: '模切' };
+export type FactoryProcessStage = keyof typeof FACTORY_STAGE_LABELS;
+export const isFactoryProcessStage = (value: unknown): value is FactoryProcessStage =>
+  typeof value === 'string' && Object.hasOwn(FACTORY_STAGE_LABELS, value);
+export interface FactoryProcessRule {
+  stage: FactoryProcessStage;
+  after: FactoryProcessStage;
+  required?: boolean;
+}
 export interface ProductionStep {
   id: string;
   kind: 'artwork' | 'layer' | 'die' | ManualOperation;
@@ -33,6 +42,8 @@ export interface ProductionPlan {
   stockCode?: string;
   note?: string;
   steps: ProductionStep[];
+  /** Recover interleaved operations when the original two faces are paired again. */
+  splitOrder?: { pair: string; ids: string[]; crossDependencies: Record<string, string> };
   printProfile?: PrintJobProfile;
 }
 export const EMPTY_PLAN: ProductionPlan = { dieShape: 'card', steps: [] };
@@ -73,6 +84,42 @@ export function productionSteps(project: Project, plan = project.production ?? E
     else ordered.splice(before, 0, step);
   }
   return ordered.filter(step => step.face === 'both' || faces.includes(step.face));
+}
+
+export function factoryProductionOrder(project: Project, faces: SideName[], profile?: PrintJobProfile) {
+  const steps = productionSteps(project, project.production, faces);
+  const issues: { step: LinkedStep; message: string }[] = [];
+  if (profile?.route !== 'specialty' || !profile.processRules?.length) return { steps, issues };
+
+  const ids = new Set(steps.map(step => step.id));
+  const prerequisites = new Map(steps.map(step =>
+    [step.id, new Set(step.requiresStepId && ids.has(step.requiresStepId) ? [step.requiresStepId] : [])]));
+  const stageOf = (step: LinkedStep) => step.channel ?? step.kind;
+  for (const rule of profile.processRules) {
+    for (const step of steps.filter(step => stageOf(step) === rule.stage)) {
+      const previous = steps.filter(candidate => stageOf(candidate) === rule.after &&
+        (step.face === 'both' || candidate.face === 'both' || step.face === candidate.face));
+      if (!previous.length && rule.required) {
+        issues.push({ step, message: `「${step.name}」须先完成${FACTORY_STAGE_LABELS[rule.after]}，当前交稿缺少该工序` });
+      }
+      for (const candidate of previous) prerequisites.get(step.id)!.add(candidate.id);
+    }
+  }
+  const order: LinkedStep[] = [];
+  const placed = new Set<string>();
+  const pending = [...steps];
+  // Preserve the proposed order for steps whose precedence is not constrained by this profile.
+  while (pending.length) {
+    const index = pending.findIndex(step => [...prerequisites.get(step.id)!].every(id => placed.has(id)));
+    if (index < 0) {
+      issues.push({ step: pending[0], message: `「${pending[0].name}」的厂规顺序与前置工序冲突` });
+      return { steps, issues };
+    }
+    const [step] = pending.splice(index, 1);
+    order.push(step);
+    placed.add(step.id);
+  }
+  return { steps: order, issues };
 }
 
 export function dieBounds(project: Pick<Project, 'widthMm' | 'heightMm' | 'cornerRadiusMm'>, shape: DieShape) {

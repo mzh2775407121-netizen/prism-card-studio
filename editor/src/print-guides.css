@@ -34,7 +34,7 @@
 .canvas-guide-legend {
   position: absolute;
   z-index: 2;
-  right: 0;
+  right: 12px;
   bottom: 16px;
 }
 .print-guide-legend.compact-guides {
@@ -42,19 +42,47 @@
   display: flex;
   align-items: center;
   padding: 6px 12px;
-  gap: 12px;
-  min-height: 36px;
+  gap: 25px;
+  height: 36.288px;
   border: none;
-  border-radius: var(--radius-panel);
-  corner-shape: var(--prism-corner);
+  border-radius: 12px;
+  corner-shape: round;
   background: #2c2c2c;
+  color: #f1f4ee;
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
 }
-.compact-guides li { flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
-.compact-guides li + li { border-left: 1px solid #393939; padding-left: 12px; }
-.compact-guides .guide-sample { width: 13px; flex: none; margin-top: 0; }
-.compact-guides strong { font-size: 9px; white-space: nowrap; }
+.print-guide-legend.compact-guides li {
+  position: relative;
+  width: 40px;
+  flex: 0 0 40px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+.compact-guides li + li::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: -13px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 18px;
+  background: #333;
+}
+.compact-guides .guide-sample {
+  width: 12.536px;
+  height: 5.938px;
+  flex: none;
+  margin: 0;
+  border: none;
+  background: linear-gradient(to right, currentColor 1.32px, transparent 1.32px) left 2.64px repeat-x;
+  background-size: 3.3px .66px;
+  opacity: .65;
+}
+.compact-guides strong { font-size: 7.917px; line-height: 12px; font-weight: 600; white-space: nowrap; }
 @media (max-width: 1350px) {
-  .canvas-guide-legend { right: 10px; bottom: 62px; }
+  .canvas-guide-legend { bottom: 62px; }
 }
 @media (max-width: 430px) {
   .canvas-notes { left: 9px; right: 9px; }

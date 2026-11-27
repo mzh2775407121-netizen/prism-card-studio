@@ -1,4 +1,4 @@
-import { Fragment, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useCallback, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import './inspector-menu.css';
 
@@ -15,6 +15,7 @@ export interface InspectorMenuOption {
 export interface InspectorMenuProps {
   value?: string;
   onChange?: (value: string) => void;
+  onOptionPreview?: (value?: string) => void;
   options: InspectorMenuOption[];
   ariaLabel: string;
   id?: string;
@@ -35,7 +36,7 @@ type MenuPosition = { left: number; top: number; width: number; maxHeight: numbe
 const optionText = (option: InspectorMenuOption) => option.textValue ??
   (typeof option.label === 'string' || typeof option.label === 'number' ? String(option.label) : option.value);
 
-export default function InspectorMenu({ value, onChange, options, ariaLabel, id, disabled = false, className = '',
+export default function InspectorMenu({ value, onChange, onOptionPreview, options, ariaLabel, id, disabled = false, className = '',
   placeholder, displayValue, triggerIcon, showChevron, chevronIcon, menuTitle, menuWidth,
   variant = 'select', align = 'start' }: InspectorMenuProps) {
   const uid = useId();
@@ -46,6 +47,9 @@ export default function InspectorMenu({ value, onChange, options, ariaLabel, id,
   const list = useRef<HTMLDivElement>(null);
   const rows = useRef(new Map<number, HTMLDivElement>());
   const search = useRef({ text: '', time: 0 });
+  const previewCallback = useRef(onOptionPreview);
+  const previewed = useRef<string | undefined>(undefined);
+  const pointer = useRef<{ x: number; y: number } | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const [keyboard, setKeyboard] = useState(false);
@@ -58,8 +62,39 @@ export default function InspectorMenu({ value, onChange, options, ariaLabel, id,
   const firstEnabled = enabled[0] ?? -1;
   const lastEnabled = enabled.at(-1) ?? -1;
   const optionId = (index: number) => `${uid}-option-${index}`;
+  const canPreview = Boolean(onOptionPreview);
+
+  useLayoutEffect(() => { previewCallback.current = onOptionPreview; }, [onOptionPreview]);
+
+  const preview = useCallback((next?: string) => {
+    if (previewed.current === next) return;
+    previewed.current = next;
+    previewCallback.current?.(next);
+  }, []);
+
+  const stopPreview = useCallback(() => {
+    pointer.current = undefined;
+    preview();
+  }, [preview]);
+
+  const previewAt = (element: EventTarget | null) => {
+    const row = element instanceof Element ? element.closest<HTMLElement>('[data-preview-value]') : null;
+    preview(row && list.current?.contains(row) ? row.dataset.previewValue : undefined);
+  };
+
+  const refreshPreview = () => {
+    const point = pointer.current;
+    if (point) previewAt(document.elementFromPoint(point.x, point.y));
+  };
+
+  const previewPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'touch') return;
+    pointer.current = { x: event.clientX, y: event.clientY };
+    previewAt(event.target);
+  };
 
   const close = (restoreFocus = false) => {
+    stopPreview();
     setOpen(false);
     setPosition(null);
     search.current = { text: '', time: 0 };
@@ -167,8 +202,20 @@ export default function InspectorMenu({ value, onChange, options, ariaLabel, id,
   }, [open, menuWidth, align, menuTitle, options.length]);
 
   useLayoutEffect(() => {
-    if (open && position) list.current?.focus({ preventScroll: true });
+    if (open && position) {
+      list.current?.focus({ preventScroll: true });
+      if (canPreview) rows.current.get(active)?.scrollIntoView({ block: 'nearest' });
+    }
   }, [open, Boolean(position)]);
+
+  useLayoutEffect(() => {
+    if (!open || !canPreview) return;
+    window.addEventListener('blur', stopPreview);
+    return () => {
+      window.removeEventListener('blur', stopPreview);
+      stopPreview();
+    };
+  }, [open, canPreview, stopPreview]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -176,8 +223,10 @@ export default function InspectorMenu({ value, onChange, options, ariaLabel, id,
     if (active < 0 || !options[active] || options[active].disabled) {
       if (active !== firstEnabled) setActive(firstEnabled);
     }
-    rows.current.get(active)?.scrollIntoView({ block: 'nearest' });
-  }, [open, active, options, disabled, firstEnabled]);
+    if (!canPreview || keyboard) rows.current.get(active)?.scrollIntoView({ block: 'nearest' });
+    if (canPreview && previewed.current !== undefined && !options.some(option =>
+      option.value === previewed.current && !option.disabled && !option.action)) refreshPreview();
+  }, [open, active, options, disabled, firstEnabled, keyboard, canPreview]);
 
   const menuKey = (event: KeyboardEvent<HTMLDivElement>) => {
     event.stopPropagation();
@@ -185,17 +234,17 @@ export default function InspectorMenu({ value, onChange, options, ariaLabel, id,
     if (event.key === 'Tab') { close(true); return; }
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(active); return; }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault(); setKeyboard(true);
+      event.preventDefault(); setKeyboard(true); stopPreview();
       if (!enabled.length) return;
       const index = enabled.indexOf(active);
       setActive(enabled[(index + (event.key === 'ArrowDown' ? 1 : enabled.length - 1) + enabled.length) % enabled.length]);
       return;
     }
     if (event.key === 'Home' || event.key === 'End') {
-      event.preventDefault(); setKeyboard(true); setActive(event.key === 'Home' ? firstEnabled : lastEnabled); return;
+      event.preventDefault(); setKeyboard(true); stopPreview(); setActive(event.key === 'Home' ? firstEnabled : lastEnabled); return;
     }
     if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1 && !event.nativeEvent.isComposing) {
-      event.preventDefault(); setKeyboard(true);
+      event.preventDefault(); setKeyboard(true); stopPreview();
       const match = findTypedOption(event.key);
       if (match >= 0) setActive(match);
     }
@@ -207,7 +256,14 @@ export default function InspectorMenu({ value, onChange, options, ariaLabel, id,
     aria-selected={variant === 'select' ? !option.action && value === option.value : undefined}
     aria-disabled={option.disabled || undefined} data-active={active === index || undefined}
     data-keyboard={keyboard && active === index || undefined} data-action={!!option.action || undefined}
-    onPointerEnter={event => { if (!option.disabled && event.pointerType !== 'touch') { setActive(index); setKeyboard(false); } }}
+    data-preview-value={canPreview && !option.disabled && !option.action ? option.value : undefined}
+    onPointerEnter={event => {
+      if (!option.disabled && event.pointerType !== 'touch') { setActive(index); setKeyboard(false); }
+      if (canPreview) previewPointer(event);
+    }}
+    onPointerLeave={canPreview ? event => {
+      if (event.pointerType !== 'touch') previewAt(event.relatedTarget);
+    } : undefined}
     onPointerDown={event => { if (event.pointerType === 'mouse') event.preventDefault(); }}
     onClick={() => choose(index)}>
     {option.icon && <span className="inspector-menu-option-icon" aria-hidden="true">{option.icon}</span>}
@@ -257,7 +313,8 @@ export default function InspectorMenu({ value, onChange, options, ariaLabel, id,
       {menuTitle && <div className="inspector-menu-title">{menuTitle}</div>}
       <div ref={list} id={menuId} className="inspector-menu-list" role={variant === 'action' ? 'menu' : 'listbox'}
         aria-label={menuTitle ?? ariaLabel} aria-activedescendant={active >= 0 ? optionId(active) : undefined}
-        tabIndex={-1} onKeyDown={menuKey}>
+        tabIndex={-1} onKeyDown={menuKey} onPointerMove={canPreview ? previewPointer : undefined}
+        onPointerLeave={canPreview ? stopPreview : undefined} onScroll={canPreview ? refreshPreview : undefined}>
         {groups.map((group, index) => group.label ? <div key={index} role="group" aria-labelledby={`${uid}-group-${index}`}>
           <div id={`${uid}-group-${index}`} className="inspector-menu-group">{group.label}</div>
           {group.entries.map(({ option, index }) => renderOption(option, index))}

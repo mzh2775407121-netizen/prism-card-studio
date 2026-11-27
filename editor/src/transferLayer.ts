@@ -1,5 +1,7 @@
-import { uid, type CardNode, type CardSide, type Project, type Region, type SideName } from './model';
-import { findLayerGroup, layerGroupMembers, pruneLayerGroups } from './layerGroups';
+import { uid, type CardNode, type CardSide, type LayerGroup, type Project, type Region, type SideName } from './model';
+import { findLayerGroup, layerGroupAncestors, layerGroupMembers, pruneLayerGroups, type LayerUnitRef } from './layerGroups';
+import { applyAutoLayout, layoutParent, offsetLayoutItem } from './autoLayout';
+import { mapVectorPoints } from './vectorPaths';
 
 type Point = { x: number; y: number };
 type Transfer = { project: Project; layerId: string; groupId?: string };
@@ -74,7 +76,9 @@ function copyRegions(project: Project, origin: CardSide, target: CardSide, delta
         clipRegionId: copy(snapshot.clipRegionId),
       },
       points: region.points && translatePoints(region.points, delta),
-      strokes: region.strokes.map(stroke => ({ ...stroke, points: translatePoints(stroke.points, delta) })),
+      strokes: region.strokes.map(stroke => stroke.kind === 'selection'
+        ? { ...stroke, pathPoints: mapVectorPoints(stroke.pathPoints, point => translate(point, delta)) }
+        : { ...stroke, points: translatePoints(stroke.points, delta) }),
       sources: region.sources?.map(copy).filter((source): source is string => source !== undefined),
       ...pageShape,
     };
@@ -84,6 +88,14 @@ function copyRegions(project: Project, origin: CardSide, target: CardSide, delta
     return newId;
   }
   return { regions, copy, ids };
+}
+
+export function frozenRegionCopies(project: Project, side: CardSide, id: string) {
+  const copies = copyRegions(project, side, {...side, regions:[]}, {x:0,y:0});
+  const root = copies.copy(id);
+  if (!root || side.regions.length - 1 + copies.regions.length > 1000 ||
+    copies.regions.some(region=>region.kind==='node' && !region.snapshot && !region.bounds || region.kind==='union' && !region.sources?.length)) return;
+  return {root,regions:copies.regions.map(region=>region.id===root?{...region,name:region.name.slice(0,94)+' · 固定'}:region)};
 }
 
 function preserveSourceContours(regions: Region[], movedNodes: CardNode[], except = new Set<string>()): Region[] {
@@ -144,19 +156,24 @@ function transferProduction(project: Project, from: SideName, to: SideName, effe
 }
 
 /** Move a registered mixed group on its current face without changing outside mask users. */
-export function moveArtworkGroup(project: Project, face: SideName, groupId: string, delta: Point,
+export function moveArtworkGroup(project: Project, face: SideName, groupId: string, movement: Point,
   options: { previewAcrossFaces?: boolean } = {},
 ): CardSide | undefined {
   const side = project[face];
   const group = findLayerGroup(side, groupId);
-  if (!group || (!options.previewAcrossFaces && findLayerGroup(side, group.parentId)?.autoLayout) ||
-    !Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return undefined;
+  if (!group || side.canvasLocked || !Number.isFinite(movement.x) || !Number.isFinite(movement.y)) return undefined;
   const members = layerGroupMembers(side, groupId);
   const artworkIds = new Set(members.artworkIds), effectIds = new Set(members.effectIds);
   const nodes = side.nodes.filter(node => artworkIds.has(node.id));
   if (nodes.some(node => node.locked)) return undefined;
   const availableRegions = new Set(side.regions.map(region => region.id));
   if (side.effects.some(effect => effectIds.has(effect.id) && !availableRegions.has(effect.regionId))) return undefined;
+  const managed = !options.previewAcrossFaces && Boolean(layoutParent(side, groupId));
+  const layoutItem = managed ? offsetLayoutItem(group.layoutItem, movement) : group.layoutItem;
+  const delta = managed ? {
+    x: (layoutItem?.offset?.x ?? 0) - (group.layoutItem?.offset?.x ?? 0),
+    y: (layoutItem?.offset?.y ?? 0) - (group.layoutItem?.offset?.y ?? 0),
+  } : movement;
   if (!delta.x && !delta.y) return side;
   const moved = new Map(nodes.map(node => [node.id, node.id]));
   const masks = copyRegions(project, side, side, delta, moved, true,
@@ -168,10 +185,33 @@ export function moveArtworkGroup(project: Project, face: SideName, groupId: stri
     maskContent: effect.maskContent?.map(node => ({ ...translate(node, delta), clipRegionId: masks.copy(node.clipRegionId) })),
   } : effect);
   const groupIds = new Set(members.groups.map(item => item.id));
-  const groups = side.groups?.map(item => groupIds.has(item.id) && item.autoLayout
-    ? {...item, autoLayout:translate(item.autoLayout,delta)} : item);
+  const groups = side.groups?.map(item => groupIds.has(item.id) && (item.autoLayout || item.id === groupId && managed)
+    ? { ...item,
+      ...(item.autoLayout ? { autoLayout: translate(item.autoLayout, delta) } : {}),
+      ...(item.id === groupId && managed ? { layoutItem } : {}),
+    } : item);
   return { ...side, nodes: nextNodes, effects, groups,
     regions: preserveSourceContours(masks.regions, nodes, new Set(masks.ids.values())) };
+}
+
+export function moveCanvasLayerUnits(project: Project, face: SideName, units: LayerUnitRef[], delta: Point): CardSide {
+  const side = project[face];
+  if (side.canvasLocked || !Number.isFinite(delta.x) || !Number.isFinite(delta.y) || (!delta.x && !delta.y)) return side;
+  const groups = new Set(units.filter(unit => unit.kind === 'group').map(unit => unit.id));
+  const covered = (id?: string) => layerGroupAncestors(side, id).some(group => groups.has(group.id));
+  let next = side;
+  for (const id of groups) {
+    if (!covered(findLayerGroup(side, id)?.parentId)) {
+      next = moveArtworkGroup({ ...project, [face]: next }, face, id, delta) ?? next;
+    }
+  }
+  const artwork = new Set(units.filter(unit => unit.kind === 'artwork').map(unit => unit.id));
+  const moved = next.nodes.filter(node => artwork.has(node.id) && node.visible && !node.locked && !covered(node.groupId));
+  if (!moved.length) return next === side ? side : applyAutoLayout(next);
+  const ids = new Set(moved.map(node => node.id));
+  return applyAutoLayout({ ...next, nodes: next.nodes.map(node => !ids.has(node.id) ? node
+    : layoutParent(side, node.id) ? { ...node, layoutItem: offsetLayoutItem(node.layoutItem, delta) }
+      : translate(node, delta)) });
 }
 
 /** Atomically transfer a registered group, including nested groups and process layers. */
@@ -267,13 +307,14 @@ export function transferProcess(project: Project, from: SideName, to: SideName, 
   const mask = copyRegions(project, origin, target, { x: 0, y: 0 });
   const regionId = mask.copy(effect.regionId);
   if (!regionId) return undefined;
+  const maskContent = effect.maskContent?.map(node => ({...node, clipRegionId:mask.copy(node.clipRegionId)}));
   const layerId = availableId(layerIds(target), effectId);
   const production = transferProduction(project, from, to, new Map([[effectId, layerId]]));
   return {
     project: {
       ...project, production,
       [from]: pruneLayerGroups({ ...origin, effects: origin.effects.filter(item => item.id !== effectId) }),
-      [to]: { ...target, regions: mask.regions, effects: [...target.effects, { ...effect, id: layerId, regionId,
+      [to]: { ...target, regions: mask.regions, effects: [...target.effects, { ...effect, id: layerId, regionId, maskContent,
         groupId: findLayerGroup(origin, effect.groupId) ? undefined : effect.groupId }] },
     },
     layerId,
@@ -282,14 +323,24 @@ export function transferProcess(project: Project, from: SideName, to: SideName, 
 
 /** Paste a snapshot, giving every pasted group, contour and layer its own identity. */
 export function pasteLayerSelection(project: Project, origin: CardSide, target: CardSide,
-  units: import('./layerGroups').LayerUnitRef[], position: Point, replace?: {artworkIds:string[];effectIds:string[];parentId?:string}) {
+  units: LayerUnitRef[], position: Point | 'above-original', replace?: {artworkIds:string[];effectIds:string[];parentId?:string}) {
+  const inPlace = position === 'above-original';
   const selected = new Set(units.map(unit => unit.id));
   const groupIds = new Map<string,string>();
-  for (const unit of units.filter(unit => unit.kind === 'group')) {
-    const members = layerGroupMembers(origin, unit.id);
-    for (const group of members.groups) groupIds.set(group.id, uid());
+  const sourceGroups = new Map(units.filter(unit => unit.kind === 'group').map(unit => [unit.id, layerGroupMembers(origin, unit.id)]));
+  for (const members of sourceGroups.values()) {
+    for (const group of members.groups) if (!groupIds.has(group.id)) groupIds.set(group.id, uid());
     for (const id of [...members.artworkIds, ...members.effectIds]) selected.add(id);
   }
+  function parentsOn(face: CardSide) {
+    return new Map([...face.nodes.map(node => [node.id, node.groupId] as const),
+      ...face.effects.map(effect => [effect.id, effect.groupId] as const),
+      ...(face.groups ?? []).map(group => [group.id, group.parentId] as const)]);
+  }
+  const sourceParents = inPlace ? parentsOn(origin) : undefined;
+  const targetParents = inPlace ? parentsOn(target) : undefined;
+  const roots = inPlace ? units.filter(unit => !groupIds.has(sourceParents?.get(unit.id) ?? '')) : units;
+  const targetGroups = new Map(target.groups?.map(group => [group.id, group]));
   const artwork = origin.nodes.filter(node => selected.has(node.id));
   const effects = origin.effects.filter(effect => selected.has(effect.id));
   const layoutFrames = (origin.groups || []).flatMap(group =>
@@ -298,37 +349,72 @@ export function pasteLayerSelection(project: Project, origin: CardSide, target: 
     const region = origin.regions.find(item => item.id === effect.regionId);
     return effect.maskContent?.length ? effect.maskContent : [region?.bounds ?? origin.nodes.find(node => node.id === region?.nodeId) ?? {x:0,y:0}];
   })];
-  const delta = { x: position.x - Math.min(...bounds.map(node => node.x)), y: position.y - Math.min(...bounds.map(node => node.y)) };
+  const delta = inPlace || !bounds.length ? { x: 0, y: 0 }
+    : { x: position.x - Math.min(...bounds.map(node => node.x)), y: position.y - Math.min(...bounds.map(node => node.y)) };
   const ids = new Map(artwork.map(node => [node.id, replace?.artworkIds.length === 1 && artwork.length === 1 && !effects.length ? replace.artworkIds[0] : uid()]));
-  const masks = copyRegions(project, origin, target, delta, ids, true);
-  const parent = (id?: string) => (id && groupIds.get(id)) || replace?.parentId;
+  const masks = copyRegions(project, origin, target, delta, ids, !inPlace);
+  const parent = (id: string, sourceParent?: string) => {
+    const clonedParent = sourceParent && groupIds.get(sourceParent);
+    if (clonedParent) return clonedParent;
+    if (!targetParents) return replace?.parentId;
+    if (targetParents.has(id)) return targetParents.get(id);
+    return sourceParent && targetGroups.has(sourceParent) ? sourceParent : undefined;
+  };
+  const copyLayoutItem = (item: CardNode | LayerGroup, parentId?: string) => {
+    if (!parentId) return undefined;
+    if (inPlace && targetGroups.get(parentId)?.autoLayout) return { ...item.layoutItem, absolute: true as const };
+    return item.layoutItem;
+  };
   const incoming = artwork.map(node => {
-    const groupId = parent(node.groupId);
+    const groupId = parent(node.id, node.groupId);
     return { ...translate(node,delta), id:ids.get(node.id)!, groupId,
-      layoutItem: groupId ? node.layoutItem : undefined, clipRegionId:masks.copy(node.clipRegionId) };
+      layoutItem: copyLayoutItem(node, groupId), clipRegionId:masks.copy(node.clipRegionId) };
   });
   const incomingEffects = effects.map(effect => {
     const id = replace?.effectIds.length === 1 && effects.length === 1 && !artwork.length ? replace.effectIds[0] : uid();
     ids.set(effect.id,id);
-    return { ...effect, id, groupId:parent(effect.groupId), regionId:masks.copy(effect.regionId)!,
+    return { ...effect, id, groupId:parent(effect.id, effect.groupId), regionId:masks.copy(effect.regionId)!,
       maskContent:effect.maskContent?.map(node => ({ ...translate(node,delta), id:uid(), clipRegionId:masks.copy(node.clipRegionId) })) };
   });
   const groups = (origin.groups || []).filter(group => groupIds.has(group.id)).map(group => {
-    const parentId = parent(group.parentId);
+    const parentId = parent(group.id, group.parentId);
     return { ...group, id:groupIds.get(group.id)!, parentId,
       autoLayout: group.autoLayout && translate(group.autoLayout,delta),
-      layoutItem: parentId ? group.layoutItem : undefined };
+      layoutItem: copyLayoutItem(group, parentId) };
   });
   function insertAtSelection<T extends {id:string}>(existing:T[], added:T[], removed:string[]) {
     const replaced=new Set(removed);
     const last=existing.reduce((found,item,index)=>replaced.has(item.id)?index:found,-1);
     return last<0 ? [...existing,...added] : existing.flatMap((item,index)=>index===last?added:replaced.has(item.id)?[]:[item]);
   }
-  const nodes=insertAtSelection<CardNode>(target.nodes,incoming,replace?.artworkIds??[]);
-  const newEffects=insertAtSelection(target.effects,incomingEffects,replace?.effectIds??[]);
+  function insertAboveSources<T extends {id:string}>(existing:T[], added:T[], layerKind:'artworkIds'|'effectIds') {
+    const positionById = new Map(existing.map((layer,index) => [layer.id,index]));
+    const pending = new Map(added.map(layer => [layer.id,layer]));
+    const insertions = new Map<number,T[]>();
+    for (const unit of roots) {
+      const sourceIds = sourceGroups.get(unit.id)?.[layerKind] ?? [unit.id];
+      const targetIds = unit.kind === 'group' ? layerGroupMembers(target,unit.id)[layerKind] : [unit.id];
+      const top = targetIds.reduce((index,id) => Math.max(index,positionById.get(id) ?? -1),-1);
+      if (top === -1) continue;
+      for (const sourceId of sourceIds) {
+        const copyId = ids.get(sourceId);
+        const layer = copyId && pending.get(copyId);
+        if (!layer) continue;
+        const stack = insertions.get(top);
+        if (stack) stack.push(layer);
+        else insertions.set(top,[layer]);
+        pending.delete(layer.id);
+      }
+    }
+    return [...existing.flatMap((layer,index) => [layer,...(insertions.get(index) ?? [])]),...pending.values()];
+  }
+  const nodes = inPlace ? insertAboveSources<CardNode>(target.nodes,incoming,'artworkIds')
+    : insertAtSelection<CardNode>(target.nodes,incoming,replace?.artworkIds??[]);
+  const newEffects = inPlace ? insertAboveSources(target.effects,incomingEffects,'effectIds')
+    : insertAtSelection(target.effects,incomingEffects,replace?.effectIds??[]);
   const preservedIds=new Set(incoming.map(node=>node.id));
   const removedNodes=target.nodes.filter(node=>replace?.artworkIds.includes(node.id)&&!preservedIds.has(node.id));
   const regions=preserveSourceContours(masks.regions,removedNodes);
   return { side:{ ...target,nodes,regions,effects:newEffects,groups:[...(target.groups || []),...groups] },
-    units:units.map(unit => ({kind:unit.kind,id:(unit.kind==='group'?groupIds:ids).get(unit.id)!})) };
+    units:roots.map(unit => ({kind:unit.kind,id:(unit.kind==='group'?groupIds:ids).get(unit.id)!})) };
 }

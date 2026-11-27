@@ -1,12 +1,23 @@
 import type { CardNode, GradientPoint, ImageFill, LayerGradient } from './model';
+import { PATTERN_TILE_SCALE } from './model';
 import { isOpenVector } from './vectorPaths';
 
 export const MIN_GRADIENT_STOPS = 2;
-export const MAX_GRADIENT_STOPS = 12;
+export const MAX_GRADIENT_STOPS = 24;
+export const MAX_VISUAL_EFFECTS = 12;
+export const MAX_STYLE_PRESETS = 32;
+export const MAX_STYLE_PRESET_NAME = 40;
+export const roundGradientOffset = (offset: number) => Math.round(offset * 10000) / 10000;
+export { gradientStopIds } from './model';
+export const METAL_GRADIENTS: { label: string; stops: LayerGradient['stops'] }[] = [
+  { label: '哑银', stops: [[0,'#58606E'],[.22,'#AAB4C0'],[.42,'#E8EDF2'],[.47,'#F9FAFD'],[.51,'#8D9BA9'],[.74,'#CED6DD'],[1,'#657282']] },
+  { label: '暖金', stops: [[0,'#693B17'],[.21,'#B17035'],[.38,'#E8B75D'],[.47,'#FFF1BD'],[.50,'#FFE6A4'],[.53,'#AD682B'],[.78,'#E0A854'],[1,'#855223']] },
+  { label: '深色金属', stops: [[0,'#141924'],[.22,'#2C3444'],[.4,'#4C586A'],[.465,'#8794A5'],[.5,'#273041'],[.72,'#475568'],[1,'#161C26']] },
+];
 const appearanceKeys = [
   'fill', 'fillOpacity', 'fillHidden', 'gradient', 'fillMode', 'imageFill',
   'stroke', 'strokeWidth', 'strokeOpacity', 'strokeHidden', 'strokeAlign', 'strokeStyle',
-  'cornerRadius', 'blend', 'opacity',
+  'cornerRadius', 'blend', 'opacity', 'visualEffects',
 ] as const;
 type AppearanceValues = Pick<CardNode, typeof appearanceKeys[number]>;
 export type LayerAppearance = { sourceType: CardNode['type']; values: AppearanceValues };
@@ -31,10 +42,10 @@ export function pasteAppearance(target: CardNode, appearance: LayerAppearance): 
   return next;
 }
 
-export type FillType = 'solid' | 'linear' | 'radial' | 'image';
+export type FillType = 'solid' | 'linear' | 'radial' | 'image' | 'pattern';
 
 export function fillType(node: CardNode): FillType {
-  if (node.fillMode === 'solid' || node.fillMode === 'image') return node.fillMode;
+  if (node.fillMode === 'solid' || node.fillMode === 'image' || node.fillMode === 'pattern') return node.fillMode;
   if (node.fillMode === 'gradient') return node.gradient?.kind ?? 'linear';
   if (node.type === 'image') return 'image';
   return node.gradient ? node.gradient.kind ?? 'linear' : 'solid';
@@ -45,13 +56,19 @@ export function getImageFill(node: CardNode): ImageFill | undefined {
 }
 
 export function activeImageFill(node: CardNode): ImageFill | undefined {
-  return !isOpenVector(node) && fillType(node) === 'image' ? getImageFill(node) : undefined;
+  const mode = fillType(node);
+  return !isOpenVector(node) && (mode === 'image' || mode === 'pattern') ? getImageFill(node) : undefined;
+}
+
+export function patternTileWidth(node: CardNode, fill: ImageFill | undefined) {
+  if (node.fillMode !== 'pattern' || fill?.fit !== 'tile') return undefined;
+  return node.width * (fill.tileScale ?? PATTERN_TILE_SCALE.default);
 }
 
 export function hasFill(node: CardNode) {
   if (isOpenVector(node)) return false;
   const mode = fillType(node);
-  return !node.fillHidden && (mode === 'image' ? Boolean(getImageFill(node)) :
+  return !node.fillHidden && (mode === 'image' || mode === 'pattern' ? Boolean(getImageFill(node)) :
     mode === 'solid' ? node.fill !== 'transparent' : Boolean(node.gradient));
 }
 

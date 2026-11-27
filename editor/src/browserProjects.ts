@@ -1,5 +1,5 @@
 import {
-  hydrateProject, isStockReflection, isValidProjectNote, isValidStockFinish, isValidStockSpec,
+  hydrateProject, isStockReflection, isValidCanvasFacePositions, isValidProjectNote, isValidStockFinish, isValidStockSpec,
   serializeProject, type Project, type StoredProjectDocument,
 } from './model';
 import { ProjectRequestError, type ProjectSummary, type StoredProject } from './projects';
@@ -118,6 +118,9 @@ function documentForSave(project: Project): StoredProjectDocument {
         throw new ProjectRequestError('卡面反光参数无效', 400);
       }
     }
+  }
+  if (!isValidCanvasFacePositions(document.canvasFacePositions, document.cards)) {
+    throw new ProjectRequestError('卡面画布坐标无效', 400);
   }
   return document;
 }

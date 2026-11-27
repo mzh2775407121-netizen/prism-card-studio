@@ -67,8 +67,8 @@ export function StockPicker({material,spec,onMaterial,onSpec,presetMeasurements=
   </div>;
 }
 
-export function StockFinishControls({project,side,onSide,onChange,onMatch}:{
-  project:Project;side:SideName;onSide:(side:SideName)=>void;
+export function StockFinishControls({project,side,onChange,onMatch}:{
+  project:Project;side:SideName;
   onChange:(finish:StockFinish,continuous?:boolean)=>void;onMatch:()=>void;
 }) {
   const finish = getStockFinish(project,side);
@@ -80,10 +80,6 @@ export function StockFinishControls({project,side,onSide,onChange,onMatch}:{
     (isMetalFinish(finish.style)||match?.transparent===false);
   return <div className="stock-finish">
     <div className="section-heading">底材反光</div>
-    {!project.singleSided&&<div className="stock-face-tabs" role="group" aria-label="反光卡面">
-      {(['front','back'] as const).map(face=><button type="button" key={face} aria-pressed={face===side}
-        onClick={()=>onSide(face)}>{face==='front'?'正面':'背面'}</button>)}
-    </div>}
     <label className="field">反光样式<span className="stock-select"><select value={finish.style} onChange={event=>{
       const style=event.target.value as StockReflection;
       if(style!==finish.style)onChange({...finish,style,match:undefined,reviewRequired:finish.reviewRequired||!!finish.match||undefined});
@@ -188,7 +184,7 @@ export function LayerMaskField({ name, regions, value, artwork, noMask, disabled
     ...regions.map(region => ({ value: region.id, label: region.name })),
     ...(sources || []).map(node => ({ value: 'node:' + node.id, label: node.name + ' · 轮廓', group: '图层轮廓' })),
     ...maskShapes.map(([shape, label]) => ({ value: 'draw:' + shape, label: '绘制' + label + '蒙版' })),
-    ...(regions.filter(region => region.kind !== 'full').length >= 2 ? [{ value: 'union:', label: '组合已有蒙版…' }] : []),
+    ...(regions.length >= 2 ? [{ value: 'union:', label: '组合已有蒙版…' }] : []),
   ];
   return <div className="field">
     {!compact && name}

@@ -1,3 +1,4 @@
+import { physicalCardFace } from './cardMembers';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, X } from 'lucide-react';
@@ -36,12 +37,12 @@ function frameLight(x: number, y: number, opacity: number): InspectorLight {
     opacity: Math.round(clamp(opacity * 100)) / 100 };
 }
 
-function CardFace({ face, canvas, visible, transparent }: {
-  face: SideName; canvas: RefObject<HTMLCanvasElement | null>; visible: boolean; transparent: boolean;
+function CardFace({ face, label=face, canvas, visible, transparent }: {
+  face: SideName; label?: SideName; canvas: RefObject<HTMLCanvasElement | null>; visible: boolean; transparent: boolean;
 }) {
   return <div className={'card__front inspector-card-face ' + face} aria-hidden={!visible}
     style={transparent ? { backgroundColor: 'transparent' } : undefined}>
-    <canvas ref={canvas} role="img" aria-label={face === 'front' ? '卡片正面' : '卡片背面'}/>
+    <canvas ref={canvas} role="img" aria-label={label === 'front' ? '卡片正面' : '卡片背面'}/>
   </div>;
 }
 
@@ -353,7 +354,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
                     dismiss();
                   }}>
                     <CardFace face="back" canvas={backCanvas} visible={side === 'back'} transparent={transparent}/>
-                    <CardFace face="front" canvas={frontCanvas} visible={side === 'front'} transparent={transparent}/>
+                    <CardFace face="front" label={physicalCardFace(project,'front')} canvas={frontCanvas} visible={side === 'front'} transparent={transparent}/>
                   </button>
                 </div>
               </div>
@@ -361,7 +362,7 @@ export default function AlbumPreview({ project, initialSide, cardBoundsRef, mate
         </div>
         <div className="inspect-info inspector-chrome">
           <div><h2 id="inspector-card-title">{project.name}</h2>
-            <p>{material} · {project.widthMm} × {project.heightMm} mm · {side === 'front' ? '正面' : '背面'}</p></div>
+            <p>{material} · {project.widthMm} × {project.heightMm} mm · {physicalCardFace(project, side) === 'front' ? '正面' : '背面'}</p></div>
           {!project.singleSided && <div className="inspect-step">
             <button className="inspector-icon" onClick={() => flip(-1)} disabled={phase !== 'open' || flipping} aria-label="向左翻面"><ChevronLeft size={21}/></button>
             <button className="inspector-icon" onClick={() => flip(1)} disabled={phase !== 'open' || flipping} aria-label="向右翻面"><ChevronRight size={21}/></button>

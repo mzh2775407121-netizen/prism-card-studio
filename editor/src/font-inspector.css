@@ -1,0 +1,20 @@
+.style-font-status {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--inspector-muted, #b9b9b9);
+}
+
+.style-font-share {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--inspector-muted, #b9b9b9);
+  font-size: 11px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.style-font-share input {
+  accent-color: var(--editor-accent);
+  margin: 0;
+}

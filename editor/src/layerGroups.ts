@@ -1,4 +1,4 @@
-import { uid, type CardNode, type CardSide, type Effect, type LayerGroup } from './model';
+import { clearLayoutItemPlacement, uid, type CardNode, type CardSide, type Effect, type LayerGroup } from './model';
 
 export const MAX_LAYER_GROUP_NAME_LENGTH = 100;
 export const MAX_LAYER_GROUPS = 2000;
@@ -19,6 +19,11 @@ type LayerSelection = {
   groupIds?: readonly string[];
 };
 export type LayerUnitRef = { kind: LayerTreeItem['kind']; id: string };
+
+function withoutLayoutPlacement<T extends CardNode | LayerGroup>(layer: T): T {
+  const layoutItem = clearLayoutItemPlacement(layer.layoutItem);
+  return layoutItem === layer.layoutItem ? layer : {...layer, layoutItem};
+}
 
 // Only records reachable from a root are registered. Missing parents and cycles cannot enter the tree.
 function registeredGroups(side: CardSide) {
@@ -171,9 +176,11 @@ export function groupLayers(side: CardSide, selection: LayerSelection, name?: st
   return {
     side: {
       ...side,
-      nodes: topmostBlock(side.nodes, members.artwork).map(node => direct.artwork.has(node.id) ? {...node, groupId} : node),
+      nodes: topmostBlock(side.nodes, members.artwork).map(node => direct.artwork.has(node.id)
+        ? {...withoutLayoutPlacement(node), groupId} : node),
       effects: topmostBlock(side.effects, members.process).map(effect => direct.process.has(effect.id) ? {...effect, groupId} : effect),
-      groups: [...groups.map(group => direct.group.has(group?.id) ? {...group, parentId: groupId} : group), newGroup],
+      groups: [...groups.map(group => direct.group.has(group?.id)
+        ? {...withoutLayoutPlacement(group), parentId: groupId} : group), newGroup],
     },
     groupId,
   };
@@ -185,8 +192,9 @@ export function ungroupLayer(side: CardSide, groupId: string): CardSide {
   const reparentLeaf = <T extends {groupId?: string}>(layer: T): T =>
     layer.groupId === groupId ? {...layer, groupId: group.parentId} : layer;
   const groups = (side.groups ?? []).filter(item => item?.id !== groupId)
-    .map(item => item?.parentId === groupId ? {...item, parentId: group.parentId} : item);
-  return {...side, nodes: side.nodes.map(reparentLeaf), effects: side.effects.map(reparentLeaf), groups: groups.length ? groups : undefined};
+    .map(item => item?.parentId === groupId ? {...withoutLayoutPlacement(item), parentId: group.parentId} : item);
+  return {...side, nodes: side.nodes.map(node => node.groupId === groupId ? reparentLeaf(withoutLayoutPlacement(node)) : node),
+    effects: side.effects.map(reparentLeaf), groups: groups.length ? groups : undefined};
 }
 
 export function renameLayerGroup(side: CardSide, groupId: string, name: string): CardSide {
@@ -213,36 +221,47 @@ export function pruneLayerGroups(side: CardSide): CardSide {
   return {...side, groups: remaining.length ? remaining : undefined};
 }
 
+export type LayerDropPosition = 'before' | 'inside' | 'after';
+
 export function reorderLayerUnits(
-  side: CardSide, dragged: LayerUnitRef, target: LayerUnitRef, placement: 'before' | 'after' = 'before',
+  side: CardSide, dragged: LayerUnitRef, target: LayerUnitRef, placement: LayerDropPosition = 'before',
 ): CardSide {
-  const matches = (item: LayerTreeItem, ref: LayerUnitRef) => item.kind === ref.kind && item.id === ref.id;
-  function findSiblings(items: LayerTreeItem[]): LayerTreeItem[] | undefined {
-    if (items.some(item => matches(item, dragged))) return items;
-    for (const item of items) if (item.kind === 'group') {
-      const siblings = findSiblings(item.children);
-      if (siblings) return siblings;
+  if (dragged.id === target.id || (placement === 'inside' && target.kind !== 'group')) return side;
+  const entries = new Map<string, LayerTreeItem>();
+  function index(items: LayerTreeItem[]) {
+    for (const item of items) {
+      entries.set(item.id,item);
+      if (item.kind === 'group') index(item.children);
     }
   }
-  const siblings = findSiblings(buildLayerTree(side));
-  const from = siblings?.findIndex(item => matches(item, dragged)) ?? -1;
-  const to = siblings?.findIndex(item => matches(item, target)) ?? -1;
-  if (!siblings || from < 0 || to < 0 || from === to) return side;
-  const moving = leafIds([siblings[from]]);
-  const anchors = leafIds([siblings[to]]);
-
+  index(buildLayerTree(side));
+  const source = entries.get(dragged.id), anchor = entries.get(target.id);
+  if (!source || !anchor || source.kind !== dragged.kind || anchor.kind !== target.kind) return side;
+  const parent = (item:LayerTreeItem) => item.kind === 'group' ? item.group.parentId :
+    item.kind === 'artwork' ? item.node.groupId : item.effect.groupId;
+  const parentId = placement === 'inside' ? anchor.id : parent(anchor);
+  if (source.kind === 'group' && layerGroupAncestors(side,parentId).some(group => group.id === source.id)) return side;
+  const moving = leafIds([source]), anchors = leafIds([anchor]);
+  if (side.nodes.some(node => node.locked && moving.artwork.has(node.id))) return side;
+  if (placement !== 'inside' && !((moving.artwork.size && anchors.artwork.size) || (moving.process.size && anchors.process.size))) return side;
   function reorder<T extends {id: string}>(layers: T[], kind: keyof typeof moving) {
-    const anchor = anchors[kind];
-    if (!moving[kind].size || !anchor.size) return layers;
     const block = layers.filter(layer => moving[kind].has(layer.id));
+    if (!block.length) return layers;
     const remaining = layers.filter(layer => !moving[kind].has(layer.id));
-    const index = placement === 'before'
-      ? lastMemberIndex(remaining, anchor) + 1
-      : remaining.findIndex(layer => anchor.has(layer.id));
-    remaining.splice(index, 0, ...block);
-    return remaining.every((layer, position) => layer === layers[position]) ? layers : remaining;
+    const last = lastMemberIndex(remaining,anchors[kind]);
+    if (last < 0) return layers;
+    const insert = placement === 'after' ? remaining.findIndex(layer => anchors[kind].has(layer.id)) : last + 1;
+    remaining.splice(insert,0,...block);
+    return remaining.every((layer,i) => layer === layers[i]) ? layers : remaining;
   }
-  const nodes = reorder(side.nodes, 'artwork');
-  const effects = reorder(side.effects, 'process');
-  return nodes === side.nodes && effects === side.effects ? side : {...side, nodes, effects};
+  let nodes = reorder(side.nodes,'artwork'), effects = reorder(side.effects,'process');
+  let groups = side.groups;
+  if (parent(source) !== parentId) {
+    if (source.kind === 'group') groups = groups?.map(group => group.id === source.id
+      ? {...withoutLayoutPlacement(group), parentId} : group);
+    if (source.kind === 'artwork') nodes = nodes.map(node => node.id === source.id
+      ? {...withoutLayoutPlacement(node), groupId: parentId} : node);
+    if (source.kind === 'process') effects = effects.map(e => e.id === source.id ? {...e,groupId:parentId} : e);
+  }
+  return nodes === side.nodes && effects === side.effects && groups === side.groups ? side : pruneLayerGroups({...side,nodes,effects,groups});
 }

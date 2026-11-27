@@ -55,8 +55,10 @@ function hasRegionContent(side: CardSide, region: Region): boolean {
   function hasContent(area: Region): boolean {
     if (visited.has(area.id)) return false;
     visited.add(area.id);
-    if (area.inverted) return area.kind !== 'full' || area.strokes.some(stroke => stroke.erase && stroke.points.length >= 2);
-    if (area.strokes.some(stroke => !stroke.erase && stroke.points.length >= 2)) return true;
+    const addsCoverage = area.strokes.some(stroke => stroke.erase === area.inverted &&
+      (stroke.kind === 'selection' ? stroke.pathPoints.length >= 3 : stroke.points.length >= 2));
+    if (area.inverted) return area.kind !== 'full' || addsCoverage;
+    if (addsCoverage) return true;
     if (area.kind === 'paint') return false;
     if (area.kind === 'polygon') return (area.points?.length ?? 0) >= 6;
     if (area.kind === 'node') {

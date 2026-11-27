@@ -1,8 +1,9 @@
 import { getCardCornerRadiusMm, getFlashStyle, processKind, processLayerEnabled, type CardSide, type FlashStyle, type Project, type SideName } from './model';
 import { loadImage, makeCanvas, prepareStockOptics, renderArtworkLayers, renderCard, renderEffectMask, renderEffects, renderStockGround } from './render';
 import { getStockAppearance, type StockOptics } from './stockOptics';
+import { artworkFontRevision, artworkTextNodes, ensureArtworkFont } from './artworkFonts';
 
-async function lightingMask(project: Project, face: SideName, scale: number) {
+async function lightingMask(project: Project, face: SideName, scale: number, resampling?: ImageSmoothingQuality) {
   const side = project[face];
   const active = side.effects.filter(processLayerEnabled);
   const highlights = active.filter(effect => effect.opacity > 0 && ['foil', 'varnish', 'emboss', 'deboss'].includes(processKind(effect)));
@@ -11,7 +12,7 @@ async function lightingMask(project: Project, face: SideName, scale: number) {
   const context = mask.getContext('2d')!;
   for (const effect of highlights) {
     context.globalAlpha = effect.opacity * .8;
-    context.drawImage(await renderEffectMask(project, side, effect, scale), 0, 0);
+    context.drawImage(await renderEffectMask(project, side, effect, scale, false, resampling), 0, 0);
   }
   return mask;
 }
@@ -62,14 +63,14 @@ function patternMask(style: string) {
   return pending;
 }
 
-function flashMasks(project: Project, side: CardSide, scale: number): Promise<InspectorFlash[]> {
+function flashMasks(project: Project, side: CardSide, scale: number, resampling?: ImageSmoothingQuality): Promise<InspectorFlash[]> {
   const regions = new Set(side.regions.map(region => region.id));
   const effects = side.effects.filter(effect => effect.visible && effect.opacity > 0 &&
     processKind(effect) === 'reflection' && effect.maskContent?.length !== 0 && regions.has(effect.regionId));
   return Promise.all(effects.map(async effect => {
     const style = getFlashStyle(project, effect);
     const [mask, pattern, stars] = await Promise.all([
-      renderEffectMask(project, side, effect, scale),
+      renderEffectMask(project, side, effect, scale, false, resampling),
       style === 'linear' || style === 'radial' ? undefined : patternMask(style),
       style === 'cosmos' ? patternMask('stars') : undefined,
     ]);
@@ -77,26 +78,28 @@ function flashMasks(project: Project, side: CardSide, scale: number): Promise<In
   }));
 }
 
-export async function prepareInspectorFace(project: Project, face: SideName, scale: number, effects = true): Promise<InspectorFace> {
+export async function prepareInspectorFace(project: Project, face: SideName, scale: number, effects = true,
+  resampling?: ImageSmoothingQuality): Promise<InspectorFace> {
   await document.fonts.ready;
   const side = project[face];
   const hasSurface = effects && side.effects.some(effect => effect.visible && effect.opacity > 0 &&
     ['foil', 'varnish', 'emboss', 'deboss'].includes(processKind(effect)));
-  const optics = effects ? await prepareStockOptics(project, side, scale) : undefined;
+  const optics = effects ? await prepareStockOptics(project, side, scale, false, resampling) : undefined;
   const [base, artwork, surface, glare, flashes] = await Promise.all([
-    optics ? renderStockGround(project, side, scale) : renderCard(project, face, { scale, effects: false }),
-    optics ? renderArtworkLayers(project, side, scale) : [],
-    hasSurface ? renderEffects(project, side, scale, 0, false) : undefined,
-    effects ? lightingMask(project, face, scale) : undefined,
-    effects ? flashMasks(project, side, scale) : [],
+    optics ? renderStockGround(project, side, scale, resampling) : renderCard(project, face, { scale, effects: false, resampling }),
+    optics ? renderArtworkLayers(project, side, scale, resampling) : [],
+    hasSurface ? renderEffects(project, side, scale, 0, false, false, resampling) : undefined,
+    effects ? lightingMask(project, face, scale, resampling) : undefined,
+    effects ? flashMasks(project, side, scale, resampling) : [],
   ]);
   return { base, artwork, surface, optics, glare, flashes };
 }
 
 const cachedFaces = new WeakMap<CardSide, Map<string, Promise<InspectorFace>>>();
 
-export function loadInspectorFace(project: Project, face: SideName) {
+export async function loadInspectorFace(project: Project, face: SideName) {
   const faceData = project[face];
+  await Promise.all(artworkTextNodes(faceData).filter(node => node.fontRef).map(ensureArtworkFont));
   let cache = cachedFaces.get(faceData);
   if (!cache) {
     cache = new Map();
@@ -104,7 +107,7 @@ export function loadInspectorFace(project: Project, face: SideName) {
   }
   const { style, match } = getStockAppearance(project, face);
   const key = [project.widthMm, project.heightMm, getCardCornerRadiusMm(project), project.material,
-    style, project.previewStyle, match?.method, match?.orientationDeg, match?.transparent].join('/');
+    style, project.previewStyle, match?.method, match?.orientationDeg, match?.transparent, artworkFontRevision()].join('/');
   const cached = cache.get(key);
   if (cached) return cached;
   const scale = Math.min(1.5, 1000 / (Math.max(project.widthMm, project.heightMm) * 10));

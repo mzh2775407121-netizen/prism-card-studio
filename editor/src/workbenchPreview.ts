@@ -1,89 +1,36 @@
-import { printGuideBounds } from './PrintGuides';
-import { activeImageFill, hasFill, hasStroke } from './layerAppearance';
-import { pentagon, projectCards, projectForCard, type CardNode, type Project, type SideName } from './model';
+import { canvasCardRows, type CanvasFacePlacement } from './canvasCardRows';
+import { activeImageFill } from './layerAppearance';
+import { isValidProjectCover, projectCards, projectForCard, type Project } from './model';
 import { drawNode, loadImage, makeCanvas, renderCard, renderEffects, renderStockReflection, renderStockWhiteMask } from './render';
+import { renderStill } from './stillExport';
 import { isTransparentStock } from './stockMaterials';
 import { getStockAppearance, stockGroundColor } from './stockOptics';
-import { isOpenVector } from './vectorPaths';
 
-export const WORKBENCH_PREVIEW_VERSION = 6;
-const FRONT_ONLY: readonly SideName[] = ['front'];
-const BOTH_FACES: readonly SideName[] = ['front', 'back'];
+export const WORKBENCH_PREVIEW_VERSION = 8;
 
-type Bounds = { left: number; top: number; right: number; bottom: number };
-type WorkspaceFace = {
-  side: SideName;
-  x: number;
-  bounds: Bounds;
-  nodes: CardNode[];
-};
-
-function artworkBounds(node: CardNode): Bounds {
-  const { width, height } = node;
-  const angle = node.rotation * Math.PI / 180;
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const stroke = hasStroke(node) && (node.strokeOpacity ?? 1) > 0 && node.type !== 'text';
-  const alignment = isOpenVector(node) ? 'center' : node.strokeAlign ?? 'center';
-  const padding = stroke ? (node.strokeWidth ?? 0) * (alignment === 'outside' ? 1 : alignment === 'center' ? .5 : 0) : 0;
-
-  let points = [[0, 0], [width, 0], [0, height], [width, height]];
-  if (node.type === 'polygon') {
-    const polygon = node.polygon ?? pentagon(1, 1);
-    points = polygon.flatMap((x, i) => i % 2 ? [] : [[x * width, polygon[i + 1] * height]]);
-  } else if (node.pathPoints?.length && (node.type === 'line' || node.type === 'path')) {
-    // A Bézier curve is contained by the hull of its control points.
-    const path = node.type === 'line' ? node.pathPoints.slice(0, 2) : node.pathPoints;
-    points = path.flatMap((point, index) => [
-      point,
-      ...(node.type === 'path' && point.in && (index > 0 || node.pathClosed) ? [point.in] : []),
-      ...(node.type === 'path' && point.out && (index < path.length - 1 || node.pathClosed) ? [point.out] : []),
-    ]).map(point => [point.x * width, point.y * height]);
-  }
-  const bounds = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
-  for (const [x, y] of points) {
-    const localX = node.flipX ? width - x : x;
-    const localY = node.flipY ? height - y : y;
-    const px = node.x + localX * cos - localY * sin;
-    const py = node.y + localX * sin + localY * cos;
-    bounds.left = Math.min(bounds.left, px - padding);
-    bounds.top = Math.min(bounds.top, py - padding);
-    bounds.right = Math.max(bounds.right, px + padding);
-    bounds.bottom = Math.max(bounds.bottom, py + padding);
-  }
-  return bounds;
+export function workbenchFrontCovers(project: Project) {
+  const cards = projectCards(project);
+  const { projectCover } = project;
+  const cover = projectCover && isValidProjectCover(projectCover, cards) && cards.find(card => card.id === projectCover.cardId);
+  const first = cover && projectCover ? [{ card: cover, face: projectCover.face }] : [];
+  const remaining = cards.filter(card => card.looseFace !== 'back' && (!cover || card.id !== cover.id))
+    .map(card => ({ card, face: 'front' as const }));
+  return Promise.all([...first, ...remaining].slice(0, 3).map(async ({ card, face }) => {
+    const scale = Math.min(174 / card.widthMm, 246 / card.heightMm);
+    const canvas = await renderStill(projectForCard(project, card), face, {
+      width: Math.max(1, Math.round(card.widthMm * scale)),
+      height: Math.max(1, Math.round(card.heightMm * scale)),
+      background: 'transparent', resampling: 'high',
+    });
+    return canvas.toDataURL('image/png');
+  }).map(request => request.catch(() => null)));
 }
 
-function union(first: Bounds, second: Bounds): Bounds {
-  return {
-    left: Math.min(first.left, second.left), top: Math.min(first.top, second.top),
-    right: Math.max(first.right, second.right), bottom: Math.max(first.bottom, second.bottom),
-  };
-}
-
-function workspace(project: Project) {
-  const { trim, bleed } = printGuideBounds(project);
-  // Match the editor's zoom-independent spacing between its front and back artboards.
-  const backOffset = trim.width + Math.max(trim.width * .165, project.bleedMm * 20 + 24);
-  const sides = project.singleSided ? FRONT_ONLY : BOTH_FACES;
-  const faceBounds = { left: bleed.x, top: bleed.y, right: bleed.x + bleed.width, bottom: bleed.y + bleed.height };
-  const faces: WorkspaceFace[] = sides.map(side => {
-    const nodes = project[side].nodes.filter(node => node.visible && node.opacity > 0 && node.type !== 'empty'
-      && (node.type !== 'text' || !!node.text?.trim())
-      && ((hasFill(node) && (node.fillOpacity ?? 1) > 0) || (hasStroke(node) && (node.strokeOpacity ?? 1) > 0)));
-    const bounds = nodes.reduce((extent, node) => union(extent, artworkBounds(node)), faceBounds);
-    return { side, x: side === 'back' ? backOffset : 0, bounds, nodes };
-  });
-  const bounds = faces.reduce((extent, { bounds, x }) =>
-    union(extent, { ...bounds, left: bounds.left + x, right: bounds.right + x }), faceBounds);
-  return { project, faces, bounds };
-}
-
-async function drawWorkspaceFace(context: CanvasRenderingContext2D, project: Project, face: WorkspaceFace, scale: number) {
-  const side = project[face.side];
-  const { trim, bleed } = printGuideBounds(project);
+async function drawWorkspaceFace(context: CanvasRenderingContext2D, face: CanvasFacePlacement, scale: number) {
+  const { project, slot, guides: { trim, bleed } } = face;
+  const side = project[slot];
   const transparent = isTransparentStock(project.material);
-  const hasMasks = face.nodes.some(node => node.clipRegionId && side.regions.some(region => region.id === node.clipRegionId));
+  const hasMasks = side.nodes.some(node => node.visible && node.clipRegionId && side.regions.some(region => region.id === node.clipRegionId));
   const paintable = await Promise.all(side.nodes.map(async node => {
     const image = activeImageFill(node);
     if (!image) return node;
@@ -91,7 +38,7 @@ async function drawWorkspaceFace(context: CanvasRenderingContext2D, project: Pro
   }));
   const renderSide = { ...side, nodes: paintable };
   const [maskedArtwork, whiteBacking, stock, effects] = await Promise.all([
-    hasMasks ? renderCard({ ...project, [face.side]: renderSide }, face.side,
+    hasMasks ? renderCard({ ...project, [slot]: renderSide }, slot,
       { scale, effects: false, transparentGround: true }) : undefined,
     transparent ? renderStockWhiteMask(project, renderSide, scale, true) : undefined,
     renderStockReflection(project, renderSide, scale, true),
@@ -99,7 +46,7 @@ async function drawWorkspaceFace(context: CanvasRenderingContext2D, project: Pro
   ]);
 
   context.save();
-  context.translate(face.x, 0);
+  context.translate(face.x, face.y);
   const bleedPath = new Path2D();
   bleedPath.roundRect(bleed.x, bleed.y, bleed.width, bleed.height, bleed.cornerRadius);
   context.save();
@@ -117,7 +64,7 @@ async function drawWorkspaceFace(context: CanvasRenderingContext2D, project: Pro
   context.save();
   if (maskedArtwork) {
     // Layers are masked inside the editor's trim rectangle. Off-board artwork remains visible.
-    const { left, top, right, bottom } = face.bounds;
+    const { left, top, right, bottom } = face.content;
     const outside = new Path2D();
     outside.rect(left - 1, top - 1, right - left + 2, bottom - top + 2);
     outside.rect(trim.x, trim.y, trim.width, trim.height);
@@ -141,39 +88,19 @@ export async function workbenchOverview(project: Project) {
     for (let y = 7; y < canvas.height; y += 12) context.fillRect(x, y, 1, 1);
   }
 
-  const members = projectCards(project).map(card => workspace(projectForCard(project, card)));
-  const columns = Math.min(members.length, Math.ceil(Math.sqrt(members.length * 1.4)));
-  const rows = Math.ceil(members.length / columns);
-  const widths = Array<number>(columns).fill(0);
-  const heights = Array<number>(rows).fill(0);
-  members.forEach(({ bounds }, index) => {
-    const col = index % columns;
-    const row = Math.floor(index / columns);
-    widths[col] = Math.max(widths[col], bounds.right - bounds.left);
-    heights[row] = Math.max(heights[row], bounds.bottom - bounds.top);
-  });
-  const gap = 96;
-  const prefix = (sizes: number[]) => sizes.reduce((positions, size) => {
-    positions.push(positions[positions.length - 1] + size + gap);
-    return positions;
-  }, [0]);
-  const xs = prefix(widths);
-  const ys = prefix(heights);
-  const width = xs[columns] - gap;
-  const height = ys[rows] - gap;
+  const faces = canvasCardRows(project);
+  const left = Math.min(...faces.map(face => face.x + face.content.left));
+  const top = Math.min(...faces.map(face => face.y + face.content.top));
+  const width = Math.max(...faces.map(face => face.x + face.content.right)) - left;
+  const height = Math.max(...faces.map(face => face.y + face.content.bottom)) - top;
   const scale = Math.min((canvas.width - 32) / width, (canvas.height - 24) / height);
-
-  // One camera keeps every saved layer and artboard in the same coordinate space.
   context.translate((canvas.width - width * scale) / 2, (canvas.height - height * scale) / 2);
   context.scale(scale, scale);
-  for (const [index, member] of members.entries()) {
-    const col = index % columns;
-    const row = Math.floor(index / columns);
-    const { left, right, top, bottom } = member.bounds;
-    context.save();
-    context.translate(xs[col] + (widths[col] - (right - left)) / 2 - left, ys[row] + (heights[row] - (bottom - top)) / 2 - top);
-    for (const face of member.faces) await drawWorkspaceFace(context, member.project, face, scale);
-    context.restore();
-  }
+  context.translate(-left, -top);
+
+  // Overlapping artwork on the currently edited card is drawn last on the canvas.
+  const activeId = project.cardId ?? project.id + '_1';
+  const drawOrder = [...faces.filter(face => face.cardId !== activeId), ...faces.filter(face => face.cardId === activeId)];
+  for (const face of drawOrder) await drawWorkspaceFace(context, face, scale);
   return canvas.toDataURL('image/png');
 }

@@ -2,14 +2,29 @@
 .plate-proof-preview { display: grid; place-items: center; min-width: 0; padding: 22px; border-radius: var(--radius-item); corner-shape: var(--prism-corner); background: #272727; }
 .plate-proof-card { position: relative; }
 .plate-proof-card canvas { display: block; width: 100%; height: auto; }
-.plate-proof-line { position: absolute; border: 1px dashed; pointer-events: none; opacity: .7; }
-.plate-proof-line[data-guide=bleed] { color: #e06d40; }
-.plate-proof-line[data-guide=trim] { color: #237ac2; }
-.plate-proof-line[data-guide=safe] { color: #328473; }
+.plate-proof-line { position: absolute; border: 1px dashed; pointer-events: none; opacity: .6; }
 .plate-proof-status { position: absolute; inset: 0; display: grid; place-items: center; color: #e9e9e9; font-size: 12px; }
 .plate-proof-controls { display: flex; flex-direction: column; gap: 14px; }
 .plate-proof-controls fieldset { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-item); corner-shape: var(--prism-corner); font-size: 12px; }
 .plate-proof-controls label:not(.field) { display: flex; align-items: center; gap: 6px; }
 .plate-proof-controls label i { width: 8px; height: 8px; border-radius: var(--radius-detail); corner-shape: var(--prism-corner); }
 .plate-proof-controls .print-guide-legend { display: grid; grid-template-columns: 1fr; }
+.plate-proof-controls { min-width: 0; font-size: 12px; }
+.plate-proof-controls strong { overflow-wrap: anywhere; }
+.proof-issues { display: grid; gap: 6px; }
+.proof-issues button { text-align: left; line-height: 1.55; padding: 4px 0; overflow-wrap: anywhere; }
+.proof-issues button:hover { text-decoration: underline; }
+.mask-use-details summary { cursor: pointer; }
+.mask-use-details ul { padding-left: 17px; margin: 6px 0; }
+.prepress-modal {
+  --ink: var(--editor-fg); --muted: var(--editor-muted); --line: var(--editor-rule);
+  --surface: var(--editor-panel); --surface-raised: var(--editor-field); --control: var(--editor-rule);
+  color-scheme: dark;
+}
+.prepress-modal .modal-head .icon-button { color: var(--muted); }
+.prepress-modal .modal-footer { justify-content: flex-end; flex-wrap: wrap; }
+.prepress-modal .plate-proof-preview { background: #202020; }
+.prepress-modal .plate-proof-controls { max-height: min(62dvh, 570px); overflow: auto; }
+.prepress-modal .plate-proof-controls .field { color: var(--muted); }
+.prepress-modal .plate-proof-controls .field select { background-color: var(--editor-field); color: var(--ink); }
 @media (max-width: 600px) { .plate-proof { grid-template-columns: 1fr; } }

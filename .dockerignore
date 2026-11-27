@@ -1,0 +1,16 @@
+**
+!editor/
+!editor/*.py
+!editor/index.html
+!editor/package.json
+!editor/pnpm-lock.yaml
+!editor/pnpm-workspace.yaml
+!editor/print-runtime.json
+!editor/requirements.txt
+!editor/tsconfig.json
+!editor/vite.config.ts
+!editor/public/
+!editor/public/**
+!editor/src/
+!editor/src/**
+**/.DS_Store

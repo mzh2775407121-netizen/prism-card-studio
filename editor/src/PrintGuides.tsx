@@ -1,5 +1,5 @@
 import { Ellipse, Group, Rect } from 'react-konva';
-import { getCardCornerRadiusMm, type CardNode, type Project } from './model';
+import { getCardCornerRadiusMm, type CardNode, type Project, type SideName } from './model';
 import { PRINT_SAFE_MARGIN_MM } from './printProfiles';
 import './print-guides.css';
 
@@ -7,10 +7,13 @@ export { PRINT_SAFE_MARGIN_MM } from './printProfiles';
 type CardSize = Pick<Project, 'widthMm' | 'heightMm' | 'bleedMm' | 'cornerRadiusMm' | 'production'>;
 
 const guideStyles = {
-  bleed: { label: '出血线', color: '#ffab89', dash: [7, 5] },
-  trim: { label: '成品裁切线', color: '#f0f2ef', dash: [5, 4] },
-  safe: { label: '正文安全区', color: '#86e9ce', dash: [3, 4] },
+  bleed: { label: '出血线', color: '#ffab89', swatch: '#d49a85', dash: [7, 5] },
+  trim: { label: '成品裁切线', color: '#f0f2ef', swatch: '#e2e9e4', dash: [5, 4] },
+  safe: { label: '正文安全区', color: '#86e9ce', swatch: '#72cdbb', dash: [3, 4] },
 };
+const GUIDE_STROKE_PX = .857;
+export const guideColor = (key: keyof typeof guideStyles, face?: SideName) =>
+  key === 'bleed' && face === 'front' ? '#fc3d41' : guideStyles[key].color;
 
 export function getPrintSafeMarginMm(project: CardSize) {
   return project.production?.printProfile?.safeMm ?? PRINT_SAFE_MARGIN_MM;
@@ -25,7 +28,7 @@ export function printGuideBounds(project: CardSize, safeMm = getPrintSafeMarginM
   const followsCard = !project.production || project.production.dieShape === 'card';
   return {
     trim: { x: 0, y: 0, width, height, cornerRadius: radius },
-    bleed: { x: -bleed, y: -bleed, width: width + bleed * 2, height: height + bleed * 2, cornerRadius: followsCard && radius ? radius + bleed : 0 },
+    bleed: { x: -bleed, y: -bleed, width: width + bleed * 2, height: height + bleed * 2, cornerRadius: bleed === 0 && followsCard ? radius : 0 },
     safe: { x: inset, y: inset, width: width - inset * 2, height: height - inset * 2,
       cornerRadius: project.production?.dieShape === 'rectangle' ? 0 : Math.max(0, radius - inset) },
   };
@@ -67,8 +70,7 @@ export function PrintCornerPreview({ project }: { project: CardSize }) {
   </div>;
 }
 
-export function PrintGuideLegend({ project, compact = false }: { project: CardSize; compact?: boolean }) {
-  const safeMm = getPrintSafeMarginMm(project);
+export function PrintGuideLegend({ project, face, compact = false, safeMm = getPrintSafeMarginMm(project) }: { project: CardSize; face?: SideName; compact?: boolean; safeMm?: number }) {
   const labels = {
     bleed: project.bleedMm ? `四边外扩 ${project.bleedMm} mm` : '当前未设置出血',
     trim: `${project.widthMm} × ${project.heightMm} mm`,
@@ -77,19 +79,19 @@ export function PrintGuideLegend({ project, compact = false }: { project: CardSi
   return <ul className={`print-guide-legend${compact ? ' compact-guides' : ''}`} aria-label="印刷参考线">
     {(Object.keys(guideStyles) as (keyof typeof guideStyles)[]).map(key => (
       <li key={key} title={compact ? `${guideStyles[key].label} · ${labels[key]}` : undefined}>
-        <span className="guide-sample" style={{ color: key === 'bleed' && !project.bleedMm ? '#a9a9a9' : guideStyles[key].color }} aria-hidden="true" />
+        <span className="guide-sample" style={{ color: key === 'bleed' && !project.bleedMm ? '#a9a9a9' : compact ? guideStyles[key].swatch : guideColor(key, face) }} aria-hidden="true" />
         <span><strong>{guideStyles[key].label}</strong><small className={compact ? 'sr-only' : undefined}>{labels[key]}</small></span>
       </li>
     ))}
   </ul>;
 }
 
-export function PrintGuideLines({ project, scale }: { project: CardSize; scale: number }) {
+export function PrintGuideLines({ project, face, scale }: { project: CardSize; face: SideName; scale: number }) {
   const bounds = printGuideBounds(project);
   return <Group listening={false} name="print-guides">
     {(Object.keys(guideStyles) as (keyof typeof guideStyles)[]).filter(key => key !== 'bleed' || project.bleedMm > 0).map(key => {
-      const { color, dash } = guideStyles[key];
-      const stroke = { stroke: color, strokeWidth: 1 / scale, opacity: .6, dash: dash.map(length => length / scale) };
+      const { dash } = guideStyles[key];
+      const stroke = { stroke: guideColor(key, face), strokeWidth: GUIDE_STROKE_PX / scale, opacity: .6, dash: dash.map(length => length / scale) };
       if (key !== 'bleed' && project.production?.dieShape === 'ellipse') {
         const { x, y, width, height } = bounds[key];
         return <Ellipse key={key} name={`print-guide-${key}`} x={x + width / 2} y={y + height / 2}

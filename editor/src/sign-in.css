@@ -1,0 +1,220 @@
+.prism-sign-in {
+  width: min(840px, calc(100% - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  outline: none;
+  border: none;
+  border-radius: 20px;
+  color: #fff;
+  background: #16171a;
+  box-shadow: 0 24px 60px #0008;
+  font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  scrollbar-color: #42434a #16171a;
+}
+.prism-sign-in::backdrop { background: #0008; }
+.sign-in-layout {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 408fr) minmax(0, 432fr);
+  min-height: 520px;
+}
+.sign-in-layout::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 1px solid #ffffff14;
+  border-radius: 20px;
+}
+.sign-in-visual { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; overflow: hidden; }
+.sign-in-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 38px 40px 26px;
+  min-width: 0;
+}
+.sign-in-main { display: grid; gap: 22px; }
+.sign-in-heading { display: grid; justify-items: start; gap: 8px; }
+.sign-in-heading h2 { color: #fff; font-size: 22px; font-weight: 600; line-height: 30px; }
+.sign-in-heading p { color: #ffffff80; font-size: 12.5px; line-height: 18px; overflow-wrap: anywhere; }
+.sign-in-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 20px;
+  font-family: "Inter", "Work Sans", sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 20px;
+}
+.sign-in-brand img, .sign-in-close img, .sign-in-back img, .sign-in-reveal img, .sign-in-google img { display: block; flex: none; }
+.sign-in-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: #ffffff0d;
+  border-radius: 8px;
+  corner-shape: round;
+}
+.sign-in-close:hover:enabled, .sign-in-reveal:hover:enabled { background: #ffffff18; }
+.sign-in-fields {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.sign-in-field {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px 0 14px;
+  border: 1px solid #ffffff0d;
+  border-radius: 10px;
+  background: #222328;
+  transition: background 150ms, border-color 150ms;
+}
+.sign-in-field:focus-within, .sign-in-field.is-filled {
+  background: #27292f;
+  border-color: #ffffff47;
+}
+.sign-in-field.is-invalid { background: #222328; border-color: #f87171d9; }
+.sign-in-field input {
+  flex: 1;
+  align-self: stretch;
+  padding: 0;
+  color: #fffffff2;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  font-family: "Inter", "Work Sans", "PingFang SC", sans-serif;
+  font-size: 13.5px;
+  line-height: 20px;
+  color-scheme: dark;
+}
+.sign-in-field input::placeholder { color: #ffffff59; font-family: "PingFang SC", "Noto Sans SC", sans-serif; }
+.sign-in-field input:autofill {
+  -webkit-box-shadow: 0 0 0 100px #222328 inset;
+  -webkit-text-fill-color: #fffffff2;
+}
+.sign-in-code { padding-right: 6px; }
+.sign-in-send {
+  flex: none;
+  min-height: 28px;
+  padding: 6px 11px;
+  border-radius: 7px;
+  corner-shape: round;
+  background: #34363e;
+  color: #ffffffeb;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.sign-in-send:hover:enabled { background: #42444d; }
+.sign-in-send:disabled { background: #2b2d33; color: #ffffff61; opacity: 1; }
+.sign-in-reveal {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  margin-right: -6px;
+  padding: 0;
+  place-items: center;
+  color: #969aa5;
+}
+.sign-in-meta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 19px;
+  padding-bottom: 2px;
+}
+.sign-in-link, .sign-in-message {
+  padding: 0;
+  color: #ffffff8c;
+  font-size: 12px;
+  line-height: 17px;
+}
+.sign-in-link { flex: none; }
+.sign-in-link:hover:enabled { color: #fff; }
+.sign-in-back { display: flex; align-items: center; gap: 4px; font-size: 12.5px; line-height: 18px; }
+.sign-in-message { overflow-wrap: anywhere; }
+.sign-in-message.is-success { color: #34d399e6; }
+.sign-in-message.is-error { color: #f87171f2; }
+.sign-in-primary {
+  display: grid;
+  place-items: center;
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 0 12px;
+  border-radius: 10px;
+  corner-shape: round;
+  background: #fff;
+  color: #0d0e10;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  transition: background 150ms, color 150ms;
+}
+.sign-in-primary:hover:enabled { background: #e7e7ea; }
+.sign-in-primary:disabled { background: #2a2b30; color: #ffffff59; opacity: 1; }
+.sign-in-provider { display: grid; gap: 14px; }
+.sign-in-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #ffffff61;
+  font-size: 12px;
+  line-height: 16px;
+}
+.sign-in-divider::before, .sign-in-divider::after { content: ""; height: 1px; flex: 1; background: #ffffff14; }
+.sign-in-google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 10px;
+  border: 1px solid #ffffff1a;
+  border-radius: 10px;
+  corner-shape: round;
+  background: #1e1f24;
+  color: #ffffffe6;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 20px;
+  transition: background 150ms;
+}
+.sign-in-google:hover:enabled { background: #292a30; }
+.sign-in-footer {
+  min-height: 16px;
+  color: #ffffff5c;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+.prism-sign-in button:focus-visible { outline: 2px solid var(--prism-focus); outline-offset: 2px; }
+.prism-sign-in input:focus-visible { outline: none; }
+@media (max-width: 744px) {
+  .prism-sign-in { width: min(432px, calc(100% - 32px)); }
+  .sign-in-layout { grid-template-columns: minmax(0, 1fr); min-height: 470px; }
+  .sign-in-visual { display: none; }
+  .sign-in-panel { padding-inline: clamp(22px, 7vw, 40px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prism-sign-in :is(.sign-in-field, .sign-in-primary, .sign-in-google) { transition: none; }
+}

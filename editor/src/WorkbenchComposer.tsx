@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { BorderBeam } from 'border-beam';
+import { projectWorkspace } from './projects';
 
 const assets = '/assets/workbench/';
 const demoDuration = 6000;
@@ -18,7 +19,7 @@ const messages: Record<Step, string> = {
   completed: '演示完成',
 };
 
-export default function WorkbenchComposer() {
+export default function WorkbenchComposer({ requireAccount }: { requireAccount: (action: () => void) => void }) {
   const [prompt, setPrompt] = useState('');
   const [focused, setFocused] = useState(false);
   const [step, setStep] = useState<Step>('draft');
@@ -56,8 +57,10 @@ export default function WorkbenchComposer() {
   };
 
   const pickFiles = (replacement: string | null = null) => {
-    replaceAttachment.current = replacement;
-    fileInput.current?.click();
+    requireAccount(()=>{
+      replaceAttachment.current = replacement;
+      fileInput.current?.click();
+    });
   };
 
   const addFiles = (files: File[]) => {
@@ -94,9 +97,9 @@ export default function WorkbenchComposer() {
     setStep('draft');
   };
 
-  const submit = () => { if (canSubmit) setStep('running'); };
+  const submit = () => { if (canSubmit) requireAccount(()=>setStep('running')); };
 
-  return <BorderBeam className="workbench-composer-beam">
+  return <BorderBeam className="workbench-composer-beam" data-workbench-motion>
     <form className={`workbench-composer${expanded ? ' is-expanded' : ''}`} aria-label="AI 创作"
       onSubmit={event => { event.preventDefault(); submit(); }}
       onClick={event => { if (event.target === event.currentTarget) input.current?.focus(); }}
@@ -105,7 +108,7 @@ export default function WorkbenchComposer() {
         onChange={event => {
           const files = Array.from(event.currentTarget.files ?? []);
           event.currentTarget.value = '';
-          if (files.length) addFiles(files);
+          if (files.length&&projectWorkspace()) addFiles(files);
         }} />
       {attachments.length > 0 && <ul className="workbench-composer-files" aria-label="已添加的图片">
         {attachments.map(file => <li key={file.url} className="workbench-composer-file" title={file.name}>

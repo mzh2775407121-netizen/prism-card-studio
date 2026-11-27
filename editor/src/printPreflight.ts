@@ -1,21 +1,35 @@
 import JSZip from 'jszip';
 import { effectInProduction, getStockReflection, plateFor, type CardNode, type CardSide, type Effect, type Project, type Region, type SideName } from './model';
-import { activeImageFill } from './layerAppearance';
+import { activeImageFill, hasFill, hasStroke, patternTileWidth } from './layerAppearance';
+import { artworkFontProblem, regionTextNodes } from './artworkFonts';
+import { autoLayoutOverflow } from './autoLayout';
+import { intersectsPrint, printNodeBounds, vectorRasterReason } from './vectorPrint';
+import { outlineTextNode, outlineTextStyles } from './fontOutlines';
+import { visualEffectsActive } from './visualEffects';
 import { isOutsidePrintSafeArea } from './PrintGuides';
-import { imageCrop, loadImage, makeCanvas, renderCard, renderEffectMask } from './render';
-import { DIE_SHAPES, FACE_LABELS, PLATE_LABELS, productionSteps } from './production';
+import { clippedText, imageCrop, loadImage, makeCanvas, renderCard, renderEffectMask } from './render';
+import { findThinSection } from './plateDetails';
+import { DIE_SHAPES, FACE_LABELS, PLATE_LABELS, factoryProductionOrder } from './production';
 import { PRINT_SAFE_MARGIN_MM, printSpotNames, projectPrintProfile, validSpotName, type PrintJobProfile, type TechnicalPrintProfile } from './printProfiles';
 import { effectiveStockSpec, needsStockFinishMatch, stockDelivery, stockPreset, STOCK_CORES, STOCK_FINISH_METHODS } from './stockMaterials';
+import { encodeDigitalImage } from './digitalImage';
+import { physicalCardFace, projectForFaceOutput } from './cardMembers';
 
-export type PreflightTarget = { side: SideName; nodeId?: string; effectId?: string; material?: boolean };
+export type PreflightTarget = { side: SideName; nodeId?: string; effectId?: string; groupId?: string; material?: boolean; reflection?: boolean };
 export type PreflightIssue = { target: PreflightTarget; text: string; blocking: boolean };
 
-function effectivePpi(node: CardNode, image: HTMLImageElement) {
+function imageResolution(node: CardNode, image: HTMLImageElement, minPpi: number) {
   const fill = activeImageFill(node);
-  if (fill?.fit === 'contain') return 254 / Math.min(node.width / image.naturalWidth, node.height / image.naturalHeight);
+  const tileWidth = patternTileWidth(node, fill);
+  if (tileWidth !== undefined || fill?.fit === 'contain') {
+    const scale = tileWidth !== undefined ? tileWidth / image.naturalWidth : Math.min(node.width / image.naturalWidth, node.height / image.naturalHeight);
+    return { ppi: 254 / scale, width: Math.ceil(image.naturalWidth * scale * minPpi / 254), height: Math.ceil(image.naturalHeight * scale * minPpi / 254) };
+  }
   const crop = imageCrop(image, { ...node, crop: fill?.crop });
-  return Math.min(crop.width / node.width, crop.height / node.height) * 254;
+  return { ppi: Math.min(crop.width / node.width, crop.height / node.height) * 254,
+    width: Math.ceil(node.width * minPpi / 254), height: Math.ceil(node.height * minPpi / 254) };
 }
+
 
 const availableFonts = new Set<string>();
 function fontAvailable(context: CanvasRenderingContext2D, families: string) {
@@ -37,18 +51,18 @@ function linkedMaskNode(face: CardSide, region: Region) {
   return region.binding === 'fixed' && region.snapshot ? region.snapshot : face.nodes.find(node => node.id === region.nodeId);
 }
 
-function hasBrushMask(face: CardSide, region: Region | undefined, visited = new Set<string>()): boolean {
+function hasRasterMaskEdit(face: CardSide, region: Region | undefined, visited = new Set<string>()): boolean {
   if (!region || visited.has(region.id)) return false;
   visited.add(region.id);
   if (region.kind === 'paint' || region.strokes.length) return true;
   const ids = [...region.sources ?? [], linkedMaskNode(face, region)?.clipRegionId];
-  return ids.some(id => id && hasBrushMask(face, face.regions.find(item => item.id === id), visited));
+  return ids.some(id => id && hasRasterMaskEdit(face, face.regions.find(item => item.id === id), visited));
 }
 
 type MaskPixels = { effect: Effect; width: number; height: number; scale: number; left: number; top: number; right: number; bottom: number; pixels: Uint8Array };
-async function analyzeMask(project: Project, face: CardSide, effect: Effect): Promise<MaskPixels> {
+async function analyzeMask(project: Project, face: CardSide, effect: Effect, detailMm = 0): Promise<MaskPixels> {
   const span = Math.max(project.widthMm, project.heightMm) + 2 * project.bleedMm;
-  const scale = Math.min(1.2, 900 / (span * 10));
+  const scale = detailMm ? Math.min(Math.max(1.2, 4 / (detailMm * 10)), 1800 / (span * 10)) : Math.min(1.2, 900 / (span * 10));
   const canvas = await renderEffectMask(project, face, effect, scale, true);
   const { width, height } = canvas;
   const data = canvas.getContext('2d')!.getImageData(0, 0, width, height).data;
@@ -123,6 +137,27 @@ function requestedDimensions(project: Project, dpi: number) {
   return [project.widthMm, project.heightMm].map(side => Math.round((side + 2 * project.bleedMm) * scale)) as [number, number];
 }
 
+async function uncoveredBleed(project:Project, side:SideName) {
+  if (!project.bleedMm) return [];
+  const scale=Math.min(.4,480/(Math.max(project.widthMm,project.heightMm)*10));
+  const canvas=await renderCard(project,side,{scale,bleed:true,transparentGround:true,effects:false,material:false});
+  const {width,height}=canvas;
+  const {data}=canvas.getContext('2d')!.getImageData(0,0,width,height);
+  canvas.width=canvas.height=1;
+  const bleed=Math.max(1,Math.round(project.bleedMm*10*scale));
+  const alpha=(x:number,y:number)=>data[(y*width+x)*4+3];
+  const edges=[
+    {label:'左',points:(n:number)=>[[bleed,n],[0,n]],length:height},
+    {label:'右',points:(n:number)=>[[width-bleed-1,n],[width-1,n]],length:height},
+    {label:'上',points:(n:number)=>[[n,bleed],[n,0]],length:width},
+    {label:'下',points:(n:number)=>[[n,height-bleed-1],[n,height-1]],length:width},
+  ];
+  return edges.filter(({points,length})=>[.16,.33,.5,.67,.84].filter(fraction=>{
+    const [[x,y],[edgeX,edgeY]]=points(Math.round(fraction*(length-1)));
+    return alpha(x,y)>=224&&alpha(edgeX,edgeY)<192;
+  }).length>=3).map(edge=>edge.label);
+}
+
 function scopedIssues(project: Project, sides: SideName[], dpi: number, profile: PrintJobProfile, technical: TechnicalPrintProfile) {
   const target = { side: sides[0] ?? 'front', material: true } as const;
   const issues: PreflightIssue[] = [];
@@ -143,7 +178,7 @@ function scopedIssues(project: Project, sides: SideName[], dpi: number, profile:
     ? `当前导出无法生成印厂所需的 ${profile.iccName.trim()} 输出条件。可改用技术打样包供确认。`
     : '请填写厂规要求的 ICC 或输出条件。');
   if (profile.route === 'specialty') {
-    if (profile.requireVectorPlates) block('所选厂规要求矢量工艺版。当前独立工艺 PDF 由栅格蒙版生成，可另用技术打样包沟通。');
+    if (profile.requireVectorPlates) block('所选厂规要求全矢量工艺版。请先导出技术矢量包，按版核对交付报告并向印厂确认。');
     if (Object.values(profile.spotNames).some(value => value?.trim() && !validSpotName(value))) {
       block('专色名仅支持 1–64 位英文字母、数字、下划线、连字符或英文句点。');
     }
@@ -179,7 +214,12 @@ async function bleedCoverage(project: Project, side: SideName) {
 }
 
 export async function printPreflight(project: Project, sides: SideName[], technical: TechnicalPrintProfile,
-  dpi: number, signal?: AbortSignal, applyFactory = true): Promise<PreflightIssue[]> {
+  dpi: number, signal?: AbortSignal, applyFactory = true, vector = false): Promise<PreflightIssue[]> {
+  if (project.singleSided && project.looseFace === 'back' && !sides.includes('back')) {
+    const result = await printPreflight(projectForFaceOutput(project), sides.map(slot => physicalCardFace(project, slot)),
+      technical, dpi, signal, applyFactory, vector);
+    return result.map(issue => ({ ...issue, target: { ...issue.target, side: 'front' } }));
+  }
   const profile = applyFactory ? projectPrintProfile(project) : undefined;
   const issues: PreflightIssue[] = profile ? scopedIssues(project, sides, dpi, profile, technical) : [];
   if (!sides.length || (project.singleSided && sides.includes('back'))) {
@@ -206,18 +246,24 @@ export async function printPreflight(project: Project, sides: SideName[], techni
     const label = FACE_LABELS[side];
     const effects = face.effects.filter(effectInProduction);
     if (needsStockFinishMatch(project, side)) {
-      issues.push({ target: { side, material: true }, blocking: Boolean(profile),
+      issues.push({ target: { side, reflection: true }, blocking: Boolean(profile),
         text: `${label}底材反光待印厂确认，请匹配用料及加工方式。` });
       const related = new Set(effects.flatMap(effect => {
         const channel = plateFor(effect);
         return channel === 'white' || channel === 'primer' || channel === 'foil' || channel === 'clear' ? [PLATE_LABELS[channel]] : [];
       }));
-      if (related.size) issues.push({ target: { side, material: true }, blocking: false,
+      if (related.size) issues.push({ target: { side, reflection: true }, blocking: false,
         text: `请按${label}的新底材与反光用料复核${[...related].join('、')}工艺版。` });
     }
     const add = (text: string, blocking = false, nodeId?: string, effectId?: string) =>
       issues.push({ text, blocking, target: { side, nodeId, effectId } });
-    const nodes = face.nodes.filter(node => node.visible && node.opacity > 0 && node.type !== 'empty');
+    const nodes = face.nodes.filter(node => node.visible && node.opacity > 0 && node.type !== 'empty' && intersectsPrint(node,project));
+    for (const group of face.groups ?? []) {
+      if (!group.autoLayout) continue;
+      const overflow = autoLayoutOverflow(face,group.id);
+      if (overflow) issues.push({target:{side,groupId:group.id},blocking:false,
+        text:`${label}「${group.name}」自动布局溢出 ${Number((Math.max(overflow.width,overflow.height)/10).toFixed(2))} mm`});
+    }
     if (!nodes.length) add(`${label}没有可见彩稿，将导出空白彩稿`);
     const imageProbes = await Promise.allSettled([...new Set(nodes.flatMap(node => {
       const source = activeImageFill(node)?.src;
@@ -226,30 +272,67 @@ export async function printPreflight(project: Project, sides: SideName[], techni
     signal?.throwIfAborted();
     const loadedImages = new Map(imageProbes.flatMap(probe => probe.status === 'fulfilled' ? [probe.value] : []));
     for (const node of nodes) {
+      signal?.throwIfAborted();
       const name = `${label}「${node.name || '未命名图层'}」`;
-      const fill = activeImageFill(node);
+      const fill = node.fillHidden?undefined:activeImageFill(node);
+      if ((node.layoutItem?.widthMode==='fill'&&node.width<1)||(node.layoutItem?.heightMode==='fill'&&node.height<1))
+        add(`${name}的自动布局子项尺寸过小，请检查最小尺寸`,false,node.id);
+      if (vector) {
+        const reason=vectorRasterReason(node);
+        if (node.blend && node.blend!=='source-over') add(`${name}的混合模式需要栅格打样包`,true,node.id);
+        else if (reason && reason!=='图片') add(`${name}的${reason}将局部栅格化`,false,node.id);
+        else if (!reason&&node.type==='text'&&node.text?.trim()) {
+          try {
+            if (node.textStyles?.length) await outlineTextStyles(context,node);
+            else await outlineTextNode(context,node);
+          }
+          catch(error) {
+            if (node.textStyles?.length) add(`${name}的段内文字将局部栅格化（${(error as Error).message}）`,false,node.id);
+            else add(`${name}${(error as Error).message}`,true,node.id);
+          }
+        }
+      }
+      if (visualEffectsActive(node)) {
+        const {left,top,right,bottom}=printNodeBounds(node);
+        const bleed=project.bleedMm*10;
+        if(left<-bleed||top<-bleed||right>project.widthMm*10+bleed||bottom>project.heightMm*10+bleed)
+          add(`${name}的效果延伸到出血范围外，输出时会裁切`,false,node.id);
+      }
       if (node.type === 'image' && (node.fillMode ?? 'image') === 'image' && !fill && !node.fillHidden) {
         add(name + '缺少图片', true, node.id);
       } else if (fill) {
         const image = loadedImages.get(fill.src);
         if (image) {
-          const ppi = Math.floor(effectivePpi(node, image) + .05);
-          if (ppi < minPpi) add(`${name}裁切后有效分辨率 ${ppi} PPI，低于 ${minPpi} PPI`, !!profile?.minImagePpi, node.id);
+          const resolution = imageResolution(node, image, minPpi);
+          const ppi = Math.round(resolution.ppi);
+          if (resolution.ppi < minPpi-.05) add(`${name}有效分辨率 ${ppi} PPI，最低 ${minPpi} PPI 需有效像素 ${resolution.width} × ${resolution.height} px`, !!profile?.minImagePpi, node.id);
         } else {
           add(name + '图片无法读取，请重新上传', true, node.id);
         }
       }
-      if (node.type === 'text') {
-        if (node.text?.trim() && isOutsidePrintSafeArea(node, project, safeMm)) {
+      if (node.type === 'text' || node.printSafe) {
+        if ((node.type!=='text'||node.text?.trim()) && isOutsidePrintSafeArea(node, project, safeMm)) {
           add(`${name}超出正文安全区（内缩 ${safeMm} mm）`, false, node.id);
         }
-        if (node.text?.trim() && node.fontFamily && !fontAvailable(context, node.fontFamily)) {
-          add(name + '所选字体未加载，当前使用回退字体', false, node.id);
+        if (node.text?.trim()) {
+          const fontIssue = node.fontRef ? await artworkFontProblem(node) :
+            node.fontFamily && !fontAvailable(context, node.fontFamily) ? '所选字体未加载，当前使用回退字体' : undefined;
+          if (fontIssue) add(name + fontIssue, Boolean(profile || (node.fontRef && vector)), node.id);
+          else if (node.type === 'text' && (hasFill(node) || hasStroke(node))) {
+            const clipped = clippedText(context, node);
+            if (clipped) add(`${name}第 ${clipped.line} 行被裁切。框高 ${+(node.height/10).toFixed(2)} mm，完整显示至少需要 ${clipped.minHeight} mm`, Boolean(profile), node.id);
+          }
         }
       }
       if (node.clipRegionId && !face.regions.some(region => region.id === node.clipRegionId)) {
         add(name + '的裁切蒙版找不到', true, node.id);
       }
+    }
+    const bleedGaps=nodes.length&&!profile?.requireBleedArtwork?await uncoveredBleed(project,side):[];
+    if(bleedGaps.length) {
+      const background=nodes.find(node=>node.width>=.8*project.widthMm*10&&node.height>=.8*project.heightMm*10);
+      issues.push({target:{side,nodeId:background?.id,material:!background},blocking:false,
+        text:`${label}${bleedGaps.join('、')}侧彩稿未覆盖到出血边缘`});
     }
     signal?.throwIfAborted();
     if (profile?.route !== 'raster' && effects.filter(plateFor).length > 64) {
@@ -264,6 +347,21 @@ export async function printPreflight(project: Project, sides: SideName[], techni
         add(name + '缺少作用区域或关联图层', true, undefined, effect.id);
         continue;
       }
+      const maskText = [...regionTextNodes(face, [region.id]), ...effect.maskContent?.filter(node => node.visible && node.type === 'text') ?? []];
+      for (const node of new Set(maskText)) {
+        if (!node.fontRef || !node.text?.trim()) continue;
+        const problem = await artworkFontProblem(node);
+        if (problem) add(`${name}蒙版「${node.name}」${problem}`, Boolean(profile || vector), undefined, effect.id);
+      }
+      for (const node of [...effect.maskContent??[],linkedMaskNode(face,region)].filter((node):node is CardNode=>Boolean(node))) {
+        const fill=node.fillHidden?undefined:activeImageFill(node);
+        if (!fill||!node.visible) continue;
+        try {
+          const image=loadedImages.get(fill.src)??await loadImage(fill.src);
+          const {ppi,width,height}=imageResolution(node,image,minPpi);
+          if(ppi<minPpi-.05)add(`${name}蒙版「${node.name}」有效分辨率 ${Math.round(ppi)} PPI，需 ${width} × ${height} px`,!!profile?.minImagePpi,undefined,effect.id);
+        } catch { add(`${name}的蒙版图片无法读取`,true,undefined,effect.id); }
+      }
       if (effect.maskContent?.length === 0) {
         add(name + '的蒙版没有内容', !!channel, undefined, effect.id);
         continue;
@@ -274,19 +372,21 @@ export async function printPreflight(project: Project, sides: SideName[], techni
         add(name + '需要独立工艺版，请改用技术打样或取消纳入印刷输出', true, undefined, effect.id);
         continue;
       }
-      if (technical === 'alternate' && channel === 'foil' && hasBrushMask(face, region)) {
-        add(name + '含笔刷区域。技术配置 B 的箔版要求几何轮廓', true, undefined, effect.id);
+      if (technical === 'alternate' && channel === 'foil' && hasRasterMaskEdit(face, region)) {
+        add(name + '含需要栅格化的蒙版编辑。技术配置 B 的箔版要求几何轮廓', true, undefined, effect.id);
       }
       if (getStockReflection(project, side) === 'none' && channel === 'white') {
         add(name + '使用白墨，请与印厂确认覆盖率及附着条件', false, undefined, effect.id);
       }
       try {
-        const mask = await analyzeMask(project, face, effect);
+        const detailLimits = [profile?.minPlateWidthMm || 0, profile?.minKnockoutMm || 0].filter(value => value > 0);
+        const mask = await analyzeMask(project, face, effect, detailLimits.length ? Math.min(...detailLimits) : 0);
         signal?.throwIfAborted();
         if (mask.right < 0) {
           const hasCoverage = await hasPrintMaskCoverage(project, face, effect, dpi);
           signal?.throwIfAborted();
           if (!hasCoverage) add(name + '在含出血范围内没有有效覆盖，请检查轮廓、图片和作用区域', true, undefined, effect.id);
+          else if(detailLimits.length) add(name + '细节小于核稿预览的采样精度，请在最终分版中复核线宽和间隙', false, undefined, effect.id);
           continue;
         }
         if (profile?.route === 'specialty') {
@@ -294,8 +394,18 @@ export async function printPreflight(project: Project, sides: SideName[], techni
           const shortSideMm = (Math.min(mask.right - mask.left, mask.bottom - mask.top) + 2) / pixelsPerMm;
           if (profile.minPlateWidthMm > shortSideMm) {
             add(`${name}整层短边低于厂规线宽 ${profile.minPlateWidthMm} mm`, true, undefined, effect.id);
-          } else if (profile.minPlateWidthMm > 0) {
-            add(`${name}包含小于 ${profile.minPlateWidthMm} mm 的局部细节时需人工核对`, false, undefined, effect.id);
+          }
+          for (const [title, limit, ink] of [['局部线宽',profile.minPlateWidthMm,true],['反白间隙',profile.minKnockoutMm ?? 0,false]] as const) {
+            if (!limit) continue;
+            if (limit * pixelsPerMm < 3) {
+              add(`${name}${title}限值 ${limit} mm 接近采样精度，请在该工艺版人工复核`, false, undefined, effect.id);
+              continue;
+            }
+            const location = findThinSection(mask, limit * pixelsPerMm, ink);
+            if (location) {
+              const mm = (px: number) => +(px / pixelsPerMm - project.bleedMm).toFixed(2);
+              add(`${name}${title}约 ${+(location.widthPx / pixelsPerMm).toFixed(2)} mm，低于厂规 ${limit} mm（X ${mm(location.x)}，Y ${mm(location.y)} mm）`, true, undefined, effect.id);
+            }
           }
           const margin = Math.min(mask.left, mask.top, mask.width - 1 - mask.right, mask.height - 1 - mask.bottom) -
             project.bleedMm * pixelsPerMm;
@@ -335,7 +445,11 @@ export async function printPreflight(project: Project, sides: SideName[], techni
       }
     }
   }
-  const steps = productionSteps(project, project.production, sides);
+  const { steps, issues: orderIssues } = factoryProductionOrder(project, sides, profile);
+  for (const { step, message } of orderIssues) {
+    issues.push({ text: message, blocking: true,
+      target: { side: step.face === 'both' ? sides[0] : step.face, effectId: step.layerId, material: !step.layerId } });
+  }
   const positions = new Map(steps.map((step, index) => [step.id, index]));
   steps.forEach((step, index) => {
     if (!step.requiresStepId) return;
@@ -360,53 +474,12 @@ export function orientPrintCanvas(canvas: HTMLCanvasElement, side: SideName, pro
   return output;
 }
 
-function pngDensity(bytes: Uint8Array, dpi: number) {
-  // Browser canvases encode nominal density as 96 PPI. Write the requested
-  // density into pHYs and replace any prior pHYs without touching image data.
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const chunk = new Uint8Array(21);
-  const data = new DataView(chunk.buffer);
-  data.setUint32(0, 9);
-  chunk.set([112, 72, 89, 115], 4);
-  data.setUint32(8, Math.round(dpi / .0254));
-  data.setUint32(12, Math.round(dpi / .0254));
-  chunk[16] = 1;
-  let crc = -1;
-  for (const value of chunk.subarray(4, 17)) {
-    crc ^= value;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
-  }
-  data.setUint32(17, (crc ^ -1) >>> 0);
-  const parts = [bytes.slice(0, 8)];
-  for (let offset = 8; offset + 12 <= bytes.length;) {
-    const size = view.getUint32(offset) + 12;
-    const type = view.getUint32(offset + 4);
-    if (size > bytes.length - offset) throw new Error('PNG 文件结构无效');
-    if (type !== 0x70485973) parts.push(bytes.slice(offset, offset + size));
-    if (type === 0x49484452) parts.push(chunk);
-    offset += size;
-  }
-  return new Blob(parts, { type: 'image/png' });
-}
-
-function jpegDensity(bytes: Uint8Array, dpi: number) {
-  const jfif = new Uint8Array([255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 1, dpi >> 8, dpi & 255, dpi >> 8, dpi & 255, 0, 0]);
-  if (bytes[2] === 255 && bytes[3] === 224 && bytes[6] === 74 && bytes[7] === 70 && bytes[8] === 73 && bytes[9] === 70) {
-    return new Blob([bytes.slice(0, 2), jfif, bytes.slice(4 + (bytes[4] << 8) + bytes[5])], { type: 'image/jpeg' });
-  }
-  return new Blob([bytes.slice(0, 2), jfif, bytes.slice(2)], { type: 'image/jpeg' });
-}
-
-async function rasterFile(canvas: HTMLCanvasElement, profile: PrintJobProfile) {
-  const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(
-    data => data ? resolve(data) : reject(new Error('无法生成交稿图片，请降低分辨率后重试')),
-    `image/${profile.rasterFormat}`, .98));
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  return profile.rasterFormat === 'jpeg' ? jpegDensity(bytes, profile.dpi) : pngDensity(bytes, profile.dpi);
-}
-
 export async function exportFactoryRaster(project: Project, sides: SideName[], signal?: AbortSignal,
-  preflight?: PreflightIssue[], includeGrain = false) {
+  preflight?: PreflightIssue[], includeGrain = false): Promise<Blob> {
+  if (project.singleSided && project.looseFace === 'back') {
+    return exportFactoryRaster(projectForFaceOutput(project), sides.map(slot => physicalCardFace(project, slot)), signal,
+      preflight?.map(issue => ({ ...issue, target: { ...issue.target, side: 'back' } })), includeGrain);
+  }
   const production = project.production;
   const profile = production?.printProfile;
   if (!production || profile?.route !== 'raster') throw new Error('请选择普通彩印的图片交稿方式');
@@ -429,7 +502,9 @@ export async function exportFactoryRaster(project: Project, sides: SideName[], s
     const artwork = includeGrain ? { ...project, [side]: { ...project[side], effects: digitalEffects } } : project;
     const rendered = await renderCard(artwork, side, { scale: profile.dpi / 254, bleed: true, effects: includeGrain, material: false });
     const canvas = orientPrintCanvas(rendered, side, profile);
-    const data = await rasterFile(canvas, profile);
+    const data = await encodeDigitalImage(canvas, profile.rasterFormat, profile.dpi, {
+      quality: .98, failureMessage: '无法生成交稿图片，请降低分辨率后重试',
+    });
     const path = `${side}.${profile.rasterFormat === 'jpeg' ? 'jpg' : 'png'}`;
     await addFile(path, await data.arrayBuffer(), 'artwork', side);
     if (canvas !== rendered) canvas.width = canvas.height = 1;

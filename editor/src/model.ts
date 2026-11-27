@@ -1,3 +1,6 @@
+import type { ArtworkFontReference } from './artworkFonts';
+import type { TextStyleRange } from './textStyles';
+
 export type SideName = 'front' | 'back';
 export type TemplateName = 'ocean' | 'botanical' | 'editorial' | 'blank';
 export type EffectType = 'holo' | 'gold' | 'silver' | 'gloss' | 'emboss' | 'grain' | 'white';
@@ -27,6 +30,7 @@ export interface StockFinish {
   opacity: number;
   visible?: boolean;
   match?: StockFinishMatch;
+  appearance?: Pick<StockFinishMatch, 'orientationDeg' | 'method' | 'transparent'>;
   reviewRequired?: boolean;
 }
 export interface StockSpec {
@@ -43,22 +47,60 @@ export const FLASH_STYLES = {
 } as const;
 export type FlashStyle = keyof typeof FLASH_STYLES;
 export interface ImageCrop { x: number; y: number; width: number; height: number; space?: 'source' }
-export interface ImageFill { src: string; fit?: 'cover' | 'contain'; crop?: ImageCrop }
+export const PATTERN_TILE_SCALE = { min: .1, max: 2, default: .5 } as const;
+export const IMAGE_ADJUSTMENT_KEYS = ['exposure', 'contrast', 'saturation', 'brightness', 'temperature', 'tint', 'highlights', 'shadows'] as const;
+export type ImageAdjustments = Partial<Record<typeof IMAGE_ADJUSTMENT_KEYS[number], number>>;
+export interface ImageFill {
+  src: string;
+  fit?: 'cover' | 'contain' | 'tile';
+  crop?: ImageCrop;
+  tileScale?: number;
+  presetId?: string;
+  adjustments?: ImageAdjustments;
+}
 export type GradientPoint = [number, number];
 export interface LayerGradient {
   kind?: 'linear' | 'radial';
   angle: number;
   stops: [number, string][];
+  stopIds?: string[];
   endpoints?: [GradientPoint, GradientPoint];
+  radialAxis?: GradientPoint;
 }
+export type VisualEffect = {
+  id: string; enabled: boolean;
+} & (
+  { kind: 'drop-shadow' | 'inner-shadow'; x: number; y: number; radius: number; spread: number; color: string; opacity: number } |
+  { kind: 'gaussian-blur'; radius: number } |
+  { kind: 'radial-blur'; center: GradientPoint; strength: number }
+);
+export type ArtworkStylePreset = { id: string; name: string } & (
+  { kind: 'gradient'; gradient: LayerGradient } |
+  { kind: 'effects'; effects: VisualEffect[] }
+);
 export interface PathCoordinate { x: number; y: number }
 export interface PathPoint extends PathCoordinate { in?: PathCoordinate; out?: PathCoordinate }
 export type LayoutDirection = 'horizontal' | 'vertical';
 export type LayoutAlignment = 'start' | 'center' | 'end';
 export type LayoutSizeMode = 'fixed' | 'hug' | 'fill';
+export const MAX_LAYOUT_ITEM_OFFSET = 1_000_000;
 export interface LayoutItem {
   widthMode?: LayoutSizeMode;
   heightMode?: LayoutSizeMode;
+  minWidth?: number;
+  minHeight?: number;
+  offset?: { x: number; y: number };
+  absolute?: true;
+}
+export function clearLayoutItemOffset(item: LayoutItem | undefined): LayoutItem | undefined {
+  if (!item?.offset) return item;
+  const { offset: _offset, ...sizing } = item;
+  return Object.values(sizing).some(value => value !== undefined) ? sizing : undefined;
+}
+export function clearLayoutItemPlacement(item: LayoutItem | undefined): LayoutItem | undefined {
+  if (!item?.absolute) return clearLayoutItemOffset(item);
+  const { offset: _offset, absolute: _absolute, ...sizing } = item;
+  return Object.values(sizing).some(value => value !== undefined) ? sizing : undefined;
 }
 export interface AutoLayout {
   x: number; y: number; width: number; height: number;
@@ -74,26 +116,33 @@ export interface CardNode {
   x: number; y: number; width: number; height: number; rotation: number;
   flipX?: boolean; flipY?: boolean;
   opacity: number; visible: boolean; locked: boolean; fill: string;
-  stroke?: string; strokeWidth?: number; text?: string; fontSize?: number;
+  stroke?: string; strokeWidth?: number; text?: string; textStyles?: TextStyleRange[]; fontSize?: number;
   fillOpacity?: number; fillHidden?: boolean;
-  fillMode?: 'solid' | 'gradient' | 'image';
+  fillMode?: 'solid' | 'gradient' | 'image' | 'pattern';
   imageFill?: ImageFill;
   strokeOpacity?: number; strokeHidden?: boolean;
+  strokeLineCap?: CanvasLineCap; strokeLineJoin?: CanvasLineJoin; strokeMiterLimit?: number;
   strokeAlign?: 'inside' | 'center' | 'outside'; strokeStyle?: 'solid' | 'dashed' | 'dotted';
-  fontFamily?: string; fontStyle?: string; align?: string; src?: string;
+  fontFamily?: string; fontStyle?: string; fontRef?: ArtworkFontReference; align?: string; src?: string;
   verticalAlign?: 'top' | 'middle' | 'bottom';
   crop?: ImageCrop;
   blend?: string; lineHeight?: number; letterSpacing?: number; cornerRadius?: number; groupId?: string;
   clipRegionId?: string;
   unclassified?: boolean;
+  printSafe?: boolean;
   maskInk?: 'alpha' | 'dark';
   polygon?: number[];
   pathPoints?: PathPoint[];
+  contours?: PathPoint[][];
+  fillRule?: CanvasFillRule;
   pathClosed?: boolean;
   gradient?: LayerGradient;
+  visualEffects?: VisualEffect[];
   layoutItem?: LayoutItem;
 }
-export interface Stroke { points: number[]; size: number; erase: boolean }
+export type Stroke =
+  | { kind?: undefined; points: number[]; size: number; erase: boolean }
+  | { kind: 'selection'; pathPoints: PathPoint[]; erase: boolean };
 export interface Region {
   id: string; name: string; kind: 'full' | 'border' | 'node' | 'paint' | 'rect' | 'ellipse' | 'polygon' | 'union';
   nodeId?: string; binding: 'fixed' | 'follow'; inverted: boolean; strokes: Stroke[];
@@ -101,6 +150,7 @@ export interface Region {
   snapshot?: CardNode;
   points?: number[];
   sources?: string[];
+  operation?: 'union' | 'intersection' | 'subtract';
   groupMotionCopy?: true;
   maskSource?: true;
 }
@@ -126,61 +176,167 @@ export interface CardSide {
   groups?: LayerGroup[];
   reference?: { src: string; name: string };
   stockFinish?: StockFinish;
+  canvasLocked?: boolean;
 }
+export interface CommunityOrigin {
+  workId: string; edition: number; author: string; authorId?:string; publishedAuthor?:string; licenseVersion?:string;
+}
+export interface AssetOrigin { assetId:string; version:number; authorId:string; author?:string }
 interface CardDesign {
+  communityOrigin?: CommunityOrigin;
+  assetOrigin?:AssetOrigin;
+  assetFaceOrigins?:Partial<Record<SideName,AssetOrigin>>;
+  faceOrigins?: Partial<Record<SideName, CommunityOrigin>>;
   widthMm: number; heightMm: number; bleedMm: number; material: string;
   previewStyle?: 'cosmos' | 'geometric' | 'glitter' | 'original'; front: CardSide; back: CardSide;
   cornerRadiusMm?: number;
   singleSided?: boolean;
+  /** Standalone backs use the visible front slot of the single-sided card format. */
+  looseFace?: 'back';
   stockReflection?: StockReflection;
   stockSpec?: StockSpec;
   production?: import('./production').ProductionPlan;
 }
+/** Refers to a stored canvas slot. A detached back occupies the front slot. */
+export interface ProjectCover { cardId: string; face: SideName }
+
 interface ProjectIdentity {
   id: string; name: string; version: number; updatedAt: number;
   note?: string;
+  stylePresets?: ArtworkStylePreset[];
+  projectCover?: ProjectCover;
 }
 export interface ProjectCard extends CardDesign {
   id: string;
   name: string;
 }
+export type CanvasFacePoint = { x: number; y: number };
+export type CanvasFacePositions = Record<string, CanvasFacePoint>;
+export const MAX_CANVAS_POSITION = 1_000_000_000;
+export const canvasFacePositionKey = (cardId: string, face: SideName) => cardId + ':' + face;
+
 export interface StoredProjectDocument extends ProjectIdentity {
   cards: ProjectCard[];
+  canvasFacePositions?: CanvasFacePositions;
 }
-// The single-card editor edits the first card in place. Storage serializes it
-// alongside the other cards, leaving all existing editing and undo paths intact.
+// The editor exposes the selected card at the root. Its index is a view detail
+// used to reconstruct the ordered document before saving or packaging.
 export interface Project extends ProjectIdentity, CardDesign {
   cardId?: string;
   cardName?: string;
+  activeCardIndex?: number;
   additionalCards?: ProjectCard[];
+  canvasFacePositions?: CanvasFacePositions;
 }
 
 export function projectCards(project: Project): ProjectCard[] {
-  const { cardId, cardName, additionalCards, id, name: _name, version: _version, updatedAt: _updatedAt, note: _note, ...design } = project;
-  return [{ id: cardId ?? id + '_1', name: cardName ?? '卡牌 1', ...design }, ...(additionalCards ?? [])];
+  const { cardId, cardName, activeCardIndex = 0, additionalCards, id, name: _name, version: _version, updatedAt: _updatedAt, note: _note,
+    stylePresets: _stylePresets, projectCover: _cover, canvasFacePositions: _positions, ...design } = project;
+  const cards = [...(additionalCards ?? [])];
+  cards.splice(activeCardIndex, 0, { id: cardId ?? id + '_1', name: cardName ?? '卡牌 1', ...design });
+  return cards;
+}
+
+export function projectWithMembers(project: Project, cards: ProjectCard[], selectedId: string): Project {
+  const index = cards.findIndex(card => card.id === selectedId);
+  if (index < 0) throw new Error('所选卡牌不在项目中');
+  const { canvasFacePositions, projectCover } = project;
+  return { ...projectForCard({ ...project, projectCover: isValidProjectCover(projectCover, cards) ? projectCover : undefined }, cards[index]), activeCardIndex: index,
+    additionalCards: cards.filter(card => card.id !== selectedId),
+    ...(canvasFacePositions && { canvasFacePositions: positionSubset(canvasFacePositions, cards) }) };
+}
+
+function positionSubset(positions: CanvasFacePositions, cards: readonly ProjectCard[]): CanvasFacePositions {
+  return Object.fromEntries(canvasPositionKeys(cards).filter(key => Object.hasOwn(positions, key)).map(key => [key, positions[key]]));
+}
+
+function canvasPositionKeys(cards: readonly ProjectCard[]) {
+  return cards.flatMap(card => card.singleSided
+    ? [canvasFacePositionKey(card.id, 'front')]
+    : [canvasFacePositionKey(card.id, 'front'), canvasFacePositionKey(card.id, 'back')]);
+}
+
+export function isValidProjectCover(value: unknown, cards: readonly ProjectCard[]): value is ProjectCover | undefined {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const { cardId, face } = value as Partial<ProjectCover>;
+  return (face === 'front' || face === 'back') &&
+    cards.some(card => card.id === cardId && (face === 'front' || !card.singleSided));
+}
+
+export function isValidCanvasFacePositions(value: unknown, cards: readonly ProjectCard[]): value is CanvasFacePositions | undefined {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = new Set(canvasPositionKeys(cards));
+  return Object.entries(value).every(([key, point]) => keys.has(key) && point && typeof point === 'object' && !Array.isArray(point) &&
+    [point.x, point.y].every(value => Number.isFinite(value) && Math.abs(value) <= MAX_CANVAS_POSITION));
+}
+
+export function projectAtCard(project: Project, selectedId: string): Project {
+  if (project.cardId === selectedId) return project;
+  return projectWithMembers(project, projectCards(project), selectedId);
 }
 
 export function projectForCard(project: ProjectIdentity, card: ProjectCard): Project {
-  const { id, name, version, updatedAt, note } = project;
+  const { id, name, version, updatedAt, note, stylePresets, projectCover } = project;
   const { id: cardId, name: cardName, ...design } = card;
-  return { ...design, id, name, version, updatedAt, note, cardId, cardName };
+  return { ...design, id, name, version, updatedAt, note, stylePresets, cardId, cardName, ...(projectCover && { projectCover }) };
+}
+
+export const gradientStopIds = (gradient: LayerGradient) =>
+  gradient.stopIds ?? gradient.stops.map((_, index) => `legacy-${index}`);
+
+function migrateGradientIds<T extends CardDesign>(design: T): T {
+  const normalizeNode = (node: CardNode) => node.gradient && Array.isArray(node.gradient.stops) && !node.gradient.stopIds
+    ? { ...node, gradient: { ...node.gradient, stopIds: gradientStopIds(node.gradient) } } : node;
+  const normalizeSide = (side: CardSide): CardSide => ({
+    ...side,
+    nodes: side.nodes.map(normalizeNode),
+    effects: side.effects.map(effect => effect.maskContent ? { ...effect, maskContent: effect.maskContent.map(normalizeNode) } : effect),
+  });
+  return { ...design, front: normalizeSide(design.front), back: normalizeSide(design.back) };
 }
 
 export function serializeProject(project: Project): StoredProjectDocument {
-  const { id, name, version, updatedAt, note } = project;
-  return { id, name, version, updatedAt, note, cards: projectCards(project) };
+  const { id, name, version, updatedAt, note, stylePresets, projectCover, canvasFacePositions } = project;
+  const cards = projectCards(project).map(migrateGradientIds);
+  return { id, name, version, updatedAt, note, stylePresets, canvasFacePositions, cards,
+    ...(projectCover && isValidProjectCover(projectCover, cards) && { projectCover }) };
 }
 
 export function hydrateProject(document: Project | StoredProjectDocument): Project {
-  if (!('cards' in document)) return { ...document, cardId: document.cardId ?? document.id + '_1', cardName: document.cardName ?? '卡牌 1' };
-  const [first, ...additionalCards] = document.cards;
-  return { ...projectForCard(document, first), ...(additionalCards.length ? { additionalCards } : {}) };
+  const { projectCover } = document;
+  if (!('cards' in document)) {
+    const { projectCover: _cover, ...legacy } = document;
+    const project = {
+      ...migrateGradientIds(legacy), cardId: legacy.cardId ?? legacy.id + '_1', cardName: legacy.cardName ?? '卡牌 1',
+      ...(legacy.additionalCards ? { additionalCards: legacy.additionalCards.map(migrateGradientIds) } : {}),
+    };
+    return { ...project, ...(projectCover && isValidProjectCover(projectCover, projectCards(project)) && { projectCover }) };
+  }
+  const cards = document.cards.map(migrateGradientIds);
+  const [first, ...additionalCards] = cards;
+  return { ...projectForCard({ ...document, projectCover: isValidProjectCover(projectCover, cards) ? projectCover : undefined }, first),
+    ...(additionalCards.length ? { additionalCards } : {}),
+    ...(document.canvasFacePositions && { canvasFacePositions: document.canvasFacePositions }) };
 }
 
 export function copyProject(project: Project, name = project.name, version = project.version): Project {
   const document = structuredClone(serializeProject(project));
+  const cards = document.cards.map(card => ({ ...card, id: uid() }));
+  const positions: CanvasFacePositions = {};
+  document.cards.forEach((card, index) => {
+    const newKeys = canvasPositionKeys([cards[index]]);
+    canvasPositionKeys([card]).forEach((key, slot) => {
+      const point = document.canvasFacePositions?.[key];
+      if (point) positions[newKeys[slot]] = point;
+    });
+  });
+  const cover = document.projectCover;
+  const coverIndex = document.cards.findIndex(card => card.id === cover?.cardId);
   return hydrateProject({ ...document, id: uid(), name, version,
-    cards: document.cards.map(card => ({ ...card, id: uid() })),
+    cards, canvasFacePositions: document.canvasFacePositions && positions,
+    projectCover: cover && coverIndex >= 0 ? { ...cover, cardId: cards[coverIndex].id } : undefined,
   });
 }
 
@@ -235,6 +391,11 @@ export function isValidStockFinish(value: unknown): value is StockFinish {
   if (!specRecord(value) || !isStockReflection(value.style) || !specNumber(value.opacity, 0, 1)
     || (value.visible !== undefined && typeof value.visible !== 'boolean')
     || (value.reviewRequired !== undefined && typeof value.reviewRequired !== 'boolean')) return false;
+  if (value.appearance !== undefined) {
+    const a = value.appearance;
+    if (!specRecord(a) || !specNumber(a.orientationDeg, -360, 360) || typeof a.transparent !== 'boolean'
+      || !['composite', 'underprint', 'overlaminate'].includes(String(a.method))) return false;
+  }
   const match = value.match;
   return match === undefined || (value.style !== 'none' && specRecord(match)
     && specText(match.materialCode, 120) && (match.patternCode === undefined || specText(match.patternCode, 120))

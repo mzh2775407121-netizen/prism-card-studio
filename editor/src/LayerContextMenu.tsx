@@ -4,8 +4,8 @@ import './layer-context-menu.css';
 export type MenuPoint = {x:number;y:number};
 export interface LayerCommand { label:string; shortcut?:string; icon?:ReactNode; enabled:boolean; run:()=>void }
 
-export function LayerContextMenu({screen,commands,close,label='图层操作',onKeyboardClose}:{
-  screen:MenuPoint; commands:LayerCommand[]; close:()=>void; label?:string; onKeyboardClose?:()=>void;
+export function LayerContextMenu({screen,commands,close,label='图层操作',onKeyboardClose,dividers=[3,6]}:{
+  screen:MenuPoint; commands:LayerCommand[]; close:()=>void; label?:string; onKeyboardClose?:()=>void; dividers?:readonly number[];
 }) {
   const ref=useRef<HTMLDivElement>(null);
   useLayoutEffect(()=>{
@@ -34,7 +34,7 @@ export function LayerContextMenu({screen,commands,close,label='图层操作',onK
       const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowDown'?index+1:index<=0?items.length-1:index-1;
       items[next%items.length]?.focus();
     }}>
-    {commands.map((cmd,index)=><div key={cmd.label} className={index===3||index===6?'menu-divider':undefined}>
+    {commands.map((cmd,index)=><div key={cmd.label} className={dividers.includes(index)?'menu-divider':undefined}>
       <button type="button" role="menuitem" disabled={!cmd.enabled} onClick={()=>{cmd.run();close()}}>
         {cmd.icon?<span className="menu-item-label">{cmd.icon}{cmd.label}</span>:cmd.label}<span>{cmd.shortcut}</span>
       </button>

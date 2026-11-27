@@ -6,3 +6,4 @@
 .layer-context-menu button .menu-item-label { display:flex; align-items:center; gap:8px; color:inherit; }
 .layer-context-menu button:enabled:is(:hover,:focus-visible) { background:#3d3d3d; outline:none; }
 .layer-context-menu button:disabled { opacity:.42; }
+.workspace > .layer-context-menu { border-radius:8px; corner-shape:round; box-shadow:0 4px 12px #0005; }

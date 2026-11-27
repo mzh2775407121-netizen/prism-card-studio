@@ -21,10 +21,14 @@ function Measure({ label, value, onChange, disabled, min = 0 }: {
     }}/></label>;
 }
 
-export function AutoLayoutProperties({ layout, onChange, onRemove, locked = false }: {
-  layout: AutoLayout; onChange: (layout: AutoLayout) => void; onRemove: () => void; locked?: boolean;
+export function AutoLayoutProperties({ layout, overflow, onChange, onRemove, locked = false }: {
+  layout: AutoLayout; overflow?: {width:number;height:number}; onChange: (layout: AutoLayout) => void; onRemove: () => void; locked?: boolean;
 }) {
   return <StyleSection title="自动布局" actions={<button type="button" className="text-button" onClick={onRemove}>关闭</button>}>
+    {overflow&&<p className="print-status" role="status">布局溢出 · {[
+      overflow.width>.001?`宽 ${Number((overflow.width/10).toFixed(2))} mm`:null,
+      overflow.height>.001?`高 ${Number((overflow.height/10).toFixed(2))} mm`:null,
+    ].filter(Boolean).join(' · ')}</p>}
     <div className="field-grid">
       <label className="field">排列方向<select value={layout.direction} disabled={locked}
         onChange={e => onChange({ ...layout, direction: e.target.value as AutoLayout['direction'] })}>
@@ -57,18 +61,26 @@ export function AutoLayoutProperties({ layout, onChange, onRemove, locked = fals
   </StyleSection>;
 }
 
-export function LayoutItemProperties({ item, parent, allowHug, onChange, disabled }: {
-  item?: LayoutItem; parent: AutoLayout; allowHug: boolean; onChange: (item: LayoutItem) => void; disabled?: boolean;
+export function LayoutItemProperties({ item, parent, renderedSize, allowHug, onChange, disabled }: {
+  item?: LayoutItem; parent: AutoLayout; renderedSize: {width:number;height:number}; allowHug: boolean; onChange: (item: LayoutItem) => void; disabled?: boolean;
 }) {
   return <StyleSection title="自动布局尺寸"><div className="field-grid">
-    {(['widthMode','heightMode'] as const).map(key => <label className="field" key={key}>
-      {key === 'widthMode' ? '子图层宽度' : '子图层高度'}
-      <select value={item?.[key] ?? 'fixed'} disabled={disabled}
-        onChange={event => onChange({ ...item, [key]: event.target.value as LayoutSizeMode })}>
-        <option value="fixed">固定</option>
-        {allowHug && <option value="hug">随内容</option>}
-        <option value="fill" disabled={parent[key] !== 'fixed'}>填满可用空间</option>
-      </select>
-    </label>)}
+    {(['width','height'] as const).map(axis => {
+      const key = axis === 'width' ? 'widthMode' : 'heightMode';
+      const minimum = axis === 'width' ? 'minWidth' : 'minHeight';
+      const label = axis === 'width' ? '宽度' : '高度';
+      const value = item?.[minimum] ?? Math.max(1, renderedSize[axis]);
+      return <div key={axis}><label className="field">子图层{label}
+        <select value={item?.[key] ?? 'fixed'} disabled={disabled} onChange={event => {
+          const mode = event.target.value as LayoutSizeMode;
+          onChange(mode === 'fill' ? { ...item, [key]: mode, [minimum]: Math.max(1, renderedSize[axis]) } : { ...item, [key]: mode });
+        }}>
+          <option value="fixed">固定</option>
+          {allowHug && <option value="hug">随内容</option>}
+          <option value="fill" disabled={parent[key] !== 'fixed'}>填满可用空间</option>
+        </select>
+      </label>{item?.[key]==='fill'&&<Measure label={`最小${label}`} value={value} min={1} disabled={disabled}
+        onChange={next=>onChange({...item,[minimum]:next})}/>}</div>;
+    })}
   </div></StyleSection>;
 }

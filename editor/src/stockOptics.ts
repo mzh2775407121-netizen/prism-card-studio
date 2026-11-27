@@ -20,12 +20,12 @@ export function stockFinishVisible(finish: StockFinish) {
 }
 
 export function stockBlendMode(finish: StockFinish): 'source-over' | 'multiply' {
-  return finish.match?.method === 'overlaminate' ? 'source-over' : 'multiply';
+  return (finish.match ?? finish.appearance)?.method === 'overlaminate' ? 'source-over' : 'multiply';
 }
 
 export function stockGroundColor(material: string, finish: StockFinish) {
   if (!isTransparentStock(material)) return stockPreset(material)?.color ?? '#ffffff';
-  if (stockFinishVisible(finish) && (isMetalFinish(finish.style) || finish.match?.transparent === false)) return '#d4d7de';
+  if (stockFinishVisible(finish) && (isMetalFinish(finish.style) || (finish.match ?? finish.appearance)?.transparent === false)) return '#d4d7de';
   return material === 'pet-clear' ? 'rgba(238,241,248,.12)' : 'rgba(232,239,249,.18)';
 }
 
@@ -93,7 +93,7 @@ export function paintStockOptics(context: Context, optics: StockOptics, light: S
   const energy = .58 + light.opacity * .42;
   const x = width * light.x / 100, y = height * light.y / 100;
   const unit = Math.min(width, height);
-  const angle = ((finish.match?.orientationDeg ?? 0) + (finish.style === 'pillar' ? 0 : 28)) * Math.PI / 180;
+  const angle = (((finish.match ?? finish.appearance)?.orientationDeg ?? 0) + (finish.style === 'pillar' ? 0 : 28)) * Math.PI / 180;
   const phase = (light.x - 50) * .09 + (light.y - 50) * .057;
   const hue = (light.x - 50) * .45 + (light.y - 50) * .65;
 
